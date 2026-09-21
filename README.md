@@ -1,6 +1,6 @@
 # LocalDrop Mobile
 
-Peer-to-peer local file transfer app built with **Expo / React Native**.
+Peer-to-peer local file transfer app built with **Expo SDK 57 / React Native**.
 
 Supports both **Online** and **Offline** modes.
 
@@ -10,34 +10,25 @@ Supports both **Online** and **Offline** modes.
 - Offline mode → local network discovery (no internet required)
 - Multi-file queue with progress, speed & ETA
 - QR code + 6-digit pairing
-- Works great on low-RAM Android devices
-
-## Architecture
-
-| Mode     | Discovery / Pairing              | File Transfer      |
-|----------|----------------------------------|--------------------|
-| Online   | Socket.IO signaling server       | WebRTC DataChannel |
-| Offline  | Local network (mDNS / NSD)       | WebRTC DataChannel |
-
-The backend is **signaling only**. File bytes never touch the server.
+- Optimized for low-RAM Android devices
 
 ## Getting Started
 
 ```bash
-# Clone
 git clone https://github.com/ElDorado9604/localdrop-mobile.git
 cd localdrop-mobile
 
-# Install
+# Clean install
+rm -rf node_modules package-lock.json
 npm install
 
 # Start
 npx expo start
 ```
 
-### Environment
+### Environment (optional)
 
-Create a `.env` file (optional):
+Create a `.env` file:
 
 ```
 EXPO_PUBLIC_SOCKET_URL=https://your-render-backend.onrender.com

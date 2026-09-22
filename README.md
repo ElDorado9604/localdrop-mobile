@@ -4,53 +4,43 @@ Peer-to-peer local file transfer app built with **Expo SDK 57 / React Native**.
 
 Supports both **Online** and **Offline** modes.
 
-## Features (planned)
+## Current Status
 
-- Online mode → uses the existing Socket.IO signaling backend (same as web version)
-- Offline mode → local network discovery (no internet required)
-- Multi-file queue with progress, speed & ETA
-- QR code + 6-digit pairing
-- Optimized for low-RAM Android devices
+| Feature                    | Status                          |
+|---------------------------|---------------------------------|
+| Online / Offline switcher | Done                            |
+| File picker (Send)        | Done                            |
+| Create / Join pairing     | Done (Socket.IO)                |
+| Transfer progress UI      | Done (skeleton)                 |
+| WebRTC data channel       | Code ready – needs dev build    |
+| Offline local discovery   | Pending                         |
 
-## Getting Started
+## Important: WebRTC requires a Development Build
+
+`react-native-webrtc` does **not** work inside Expo Go.
+
+To test real file transfer you must create a new Android APK:
 
 ```bash
-git clone https://github.com/ElDorado9604/localdrop-mobile.git
-cd localdrop-mobile
-
-# Clean install
-rm -rf node_modules package-lock.json
-npm install
-
-# Start
-npx expo start
+npx eas-cli@latest build --platform android --profile preview
 ```
 
-### Environment (optional)
+## Getting Started (Expo Go – pairing only)
 
-Create a `.env` file:
+```bash
+git pull origin main
+npm install --legacy-peer-deps
+npx expo start --tunnel
+```
+
+## Backend URL
+
+Set in `src/lib/config.ts` or via environment:
 
 ```
-EXPO_PUBLIC_SOCKET_URL=https://your-render-backend.onrender.com
-```
-
-## Project Structure
-
-```
-app/                  # Expo Router screens
-  index.tsx           # Home (mode selector)
-  send.tsx            # Send files
-  receive.tsx         # Receive files
-  transfer.tsx        # Transfer progress
-src/lib/
-  socket.ts           # Socket.IO client (online mode)
-  config.ts           # Shared config
+EXPO_PUBLIC_SOCKET_URL=https://your-backend.onrender.com
 ```
 
 ## Related
 
 - Web + Backend: [localdrop](https://github.com/ElDorado9604/localdrop)
-
-## License
-
-MIT

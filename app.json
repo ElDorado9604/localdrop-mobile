@@ -16,6 +16,7 @@
       "bundleIdentifier": "com.eldorado.localdrop",
       "infoPlist": {
         "NSCameraUsageDescription": "Camera is used for offline QR pairing",
+        "NSMicrophoneUsageDescription": "Microphone may be used for WebRTC",
         "NSLocalNetworkUsageDescription": "Local network is used for offline file transfer"
       }
     },
@@ -30,9 +31,11 @@
         "ACCESS_NETWORK_STATE",
         "ACCESS_WIFI_STATE",
         "CHANGE_WIFI_MULTICAST_STATE",
+        "MODIFY_AUDIO_SETTINGS",
         "READ_EXTERNAL_STORAGE",
         "WRITE_EXTERNAL_STORAGE",
-        "CAMERA"
+        "CAMERA",
+        "RECORD_AUDIO"
       ]
     },
     "web": {
@@ -42,7 +45,7 @@
       "expo-router",
       "expo-document-picker",
       [
-        "@config-plugins/react-native-webrtc",
+        "./plugins/withWebRTC.js",
         {
           "cameraPermission": "Allow LocalDrop to access your camera for offline pairing",
           "microphonePermission": "Allow LocalDrop to access your microphone"

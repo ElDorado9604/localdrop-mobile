@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import {
   View,
   Text,
@@ -30,6 +30,11 @@ export default function SendScreen() {
   const [peerName, setPeerName] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  // Keep a ref so cleanup does NOT cancel the room on every status change
+  const statusRef = useRef(status);
+  statusRef.current = status;
+  const activeRoomRef = useRef(false);
+
   useEffect(() => {
     const s = getSocket();
 
@@ -39,30 +44,36 @@ export default function SendScreen() {
     };
 
     const onPeerLeft = () => {
-      setPeerName(null);
-      setStatus('waiting');
-      Alert.alert('Peer left', 'The other device disconnected.');
+      if (statusRef.current === 'connected' || statusRef.current === 'waiting') {
+        setPeerName(null);
+        setStatus('waiting');
+        Alert.alert('Peer left', 'The other device disconnected.');
+      }
     };
 
     const onCancelled = () => {
+      activeRoomRef.current = false;
       setStatus('idle');
       setPairingCode(null);
       setPeerName(null);
+      setError('Room was cancelled.');
     };
 
     s.on('room:peer-joined', onPeerJoined);
     s.on('room:peer-left', onPeerLeft);
     s.on('room:cancelled', onCancelled);
 
+    // Cleanup ONLY on unmount — never on status change
     return () => {
       s.off('room:peer-joined', onPeerJoined);
       s.off('room:peer-left', onPeerLeft);
       s.off('room:cancelled', onCancelled);
-      if (status === 'waiting' || status === 'connected') {
+      if (activeRoomRef.current) {
         cancelRoom();
+        activeRoomRef.current = false;
       }
     };
-  }, [status]);
+  }, []); // empty deps — run once
 
   async function pickFiles() {
     try {
@@ -81,7 +92,7 @@ export default function SendScreen() {
       }));
 
       setFiles((prev) => [...prev, ...picked]);
-    } catch (e) {
+    } catch {
       Alert.alert('Error', 'Could not pick files');
     }
   }
@@ -112,15 +123,29 @@ export default function SendScreen() {
       return;
     }
 
+    activeRoomRef.current = true;
     setPairingCode(res.pairingCode);
     setStatus('waiting');
   }
 
   function cancel() {
     cancelRoom();
+    activeRoomRef.current = false;
     setStatus('idle');
     setPairingCode(null);
     setPeerName(null);
+    setError(null);
+  }
+
+  function goToTransfer() {
+    router.push({
+      pathname: '/transfer',
+      params: {
+        role: 'sender',
+        peerName: peerName || 'peer',
+        fileCount: String(files.length),
+      },
+    });
   }
 
   function formatSize(bytes: number) {
@@ -135,7 +160,6 @@ export default function SendScreen() {
         Mode: {isOffline ? 'Offline (Local Discovery)' : 'Online (Signaling Server)'}
       </Text>
 
-      {/* File list */}
       <View style={styles.section}>
         <Text style={styles.sectionTitle}>Files to send</Text>
 
@@ -148,19 +172,22 @@ export default function SendScreen() {
                 <Text style={styles.fileName} numberOfLines={1}>{f.name}</Text>
                 <Text style={styles.fileSize}>{formatSize(f.size)}</Text>
               </View>
-              <Pressable onPress={() => removeFile(i)} style={styles.removeBtn}>
-                <Text style={styles.removeText}>✕</Text>
-              </Pressable>
+              {status === 'idle' && (
+                <Pressable onPress={() => removeFile(i)} style={styles.removeBtn}>
+                  <Text style={styles.removeText}>✕</Text>
+                </Pressable>
+              )}
             </View>
           ))
         )}
 
-        <Pressable style={styles.secondaryBtn} onPress={pickFiles}>
-          <Text style={styles.secondaryBtnText}>+ Add Files</Text>
-        </Pressable>
+        {status === 'idle' && (
+          <Pressable style={styles.secondaryBtn} onPress={pickFiles}>
+            <Text style={styles.secondaryBtnText}>+ Add Files</Text>
+          </Pressable>
+        )}
       </View>
 
-      {/* Pairing / Status */}
       {status === 'idle' && (
         <Pressable
           style={[styles.primaryBtn, files.length === 0 && styles.btnDisabled]}
@@ -191,9 +218,14 @@ export default function SendScreen() {
           )}
 
           {status === 'connected' && (
-            <Text style={styles.connectedText}>
-              Connected to {peerName || 'peer'}
-            </Text>
+            <>
+              <Text style={styles.connectedText}>
+                Connected to {peerName || 'peer'}
+              </Text>
+              <Pressable style={[styles.primaryBtn, { marginTop: 20, width: '100%' }]} onPress={goToTransfer}>
+                <Text style={styles.primaryBtnText}>Start Transfer</Text>
+              </Pressable>
+            </>
           )}
 
           <Pressable style={styles.cancelBtn} onPress={cancel}>

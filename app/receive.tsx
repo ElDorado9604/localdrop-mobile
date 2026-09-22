@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import {
   View,
   Text,
@@ -8,11 +8,12 @@ import {
   ActivityIndicator,
   Alert,
 } from 'react-native';
-import { useLocalSearchParams } from 'expo-router';
+import { useLocalSearchParams, useRouter } from 'expo-router';
 import { joinRoom, cancelRoom, getSocket } from '../src/lib/socket';
 
 export default function ReceiveScreen() {
   const { mode } = useLocalSearchParams<{ mode: string }>();
+  const router = useRouter();
   const isOffline = mode === 'offline';
 
   const [code, setCode] = useState('');
@@ -20,31 +21,42 @@ export default function ReceiveScreen() {
   const [peerName, setPeerName] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  const statusRef = useRef(status);
+  statusRef.current = status;
+  const activeRoomRef = useRef(false);
+
   useEffect(() => {
     const s = getSocket();
 
     const onPeerLeft = () => {
-      setStatus('idle');
-      setPeerName(null);
-      Alert.alert('Peer left', 'The sender disconnected.');
+      if (statusRef.current === 'connected') {
+        activeRoomRef.current = false;
+        setStatus('idle');
+        setPeerName(null);
+        Alert.alert('Peer left', 'The sender disconnected.');
+      }
     };
 
     const onCancelled = () => {
+      activeRoomRef.current = false;
       setStatus('idle');
       setPeerName(null);
+      setError('Room was cancelled by the sender.');
     };
 
     s.on('room:peer-left', onPeerLeft);
     s.on('room:cancelled', onCancelled);
 
+    // Cleanup ONLY on unmount
     return () => {
       s.off('room:peer-left', onPeerLeft);
       s.off('room:cancelled', onCancelled);
-      if (status === 'connected') {
+      if (activeRoomRef.current) {
         cancelRoom();
+        activeRoomRef.current = false;
       }
     };
-  }, [status]);
+  }, []); // empty deps
 
   async function handleJoin() {
     const trimmed = code.trim().toUpperCase();
@@ -69,15 +81,29 @@ export default function ReceiveScreen() {
       return;
     }
 
+    activeRoomRef.current = true;
     setPeerName(res.peerName);
     setStatus('connected');
   }
 
   function cancel() {
     cancelRoom();
+    activeRoomRef.current = false;
     setStatus('idle');
     setPeerName(null);
     setCode('');
+    setError(null);
+  }
+
+  function goToTransfer() {
+    router.push({
+      pathname: '/transfer',
+      params: {
+        role: 'receiver',
+        peerName: peerName || 'sender',
+        fileCount: '0',
+      },
+    });
   }
 
   return (
@@ -119,7 +145,11 @@ export default function ReceiveScreen() {
         <View style={styles.center}>
           <Text style={styles.connectedTitle}>Connected!</Text>
           <Text style={styles.peerText}>Sender: {peerName || 'Unknown'}</Text>
-          <Text style={styles.hint}>Waiting for files...</Text>
+          <Text style={styles.hint}>Ready to receive files</Text>
+
+          <Pressable style={[styles.primaryBtn, { marginTop: 24, width: '100%' }]} onPress={goToTransfer}>
+            <Text style={styles.primaryBtnText}>Continue</Text>
+          </Pressable>
 
           <Pressable style={styles.cancelBtn} onPress={cancel}>
             <Text style={styles.cancelText}>Cancel</Text>
@@ -164,7 +194,7 @@ const styles = StyleSheet.create({
   statusText: { color: '#aaa', marginTop: 16 },
   connectedTitle: { color: '#22c55e', fontSize: 24, fontWeight: '700' },
   peerText: { color: '#fff', marginTop: 12, fontSize: 16 },
-  cancelBtn: { marginTop: 32 },
+  cancelBtn: { marginTop: 24 },
   cancelText: { color: '#ef4444' },
   error: { color: '#ef4444', textAlign: 'center', marginTop: 16 },
 });

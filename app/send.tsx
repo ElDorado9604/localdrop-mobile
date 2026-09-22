@@ -11,12 +11,14 @@ import {
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import * as DocumentPicker from 'expo-document-picker';
 import { createRoom, cancelRoom, getSocket } from '../src/lib/socket';
+import { randomId } from '../src/lib/transferProtocol';
 
 type FileInfo = {
+  id: string;
   name: string;
   size: number;
   uri: string;
-  mimeType?: string;
+  type?: string;
 };
 
 export default function SendScreen() {
@@ -30,7 +32,6 @@ export default function SendScreen() {
   const [peerName, setPeerName] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  // Keep a ref so cleanup does NOT cancel the room on every status change
   const statusRef = useRef(status);
   statusRef.current = status;
   const activeRoomRef = useRef(false);
@@ -63,7 +64,6 @@ export default function SendScreen() {
     s.on('room:peer-left', onPeerLeft);
     s.on('room:cancelled', onCancelled);
 
-    // Cleanup ONLY on unmount — never on status change
     return () => {
       s.off('room:peer-joined', onPeerJoined);
       s.off('room:peer-left', onPeerLeft);
@@ -73,7 +73,7 @@ export default function SendScreen() {
         activeRoomRef.current = false;
       }
     };
-  }, []); // empty deps — run once
+  }, []);
 
   async function pickFiles() {
     try {
@@ -81,16 +81,14 @@ export default function SendScreen() {
         multiple: true,
         copyToCacheDirectory: true,
       });
-
       if (result.canceled) return;
-
       const picked: FileInfo[] = result.assets.map((a) => ({
+        id: randomId(),
         name: a.name,
         size: a.size ?? 0,
         uri: a.uri,
-        mimeType: a.mimeType,
+        type: a.mimeType,
       }));
-
       setFiles((prev) => [...prev, ...picked]);
     } catch {
       Alert.alert('Error', 'Could not pick files');
@@ -108,7 +106,19 @@ export default function SendScreen() {
     }
 
     if (isOffline) {
-      Alert.alert('Coming soon', 'Offline mode (local discovery) will be added next.');
+      // Offline: skip server, go straight to transfer screen
+      // True offline discovery needs a new APK; for now use online signaling on same WiFi
+      Alert.alert(
+        'Offline mode',
+        'Full offline discovery is in progress. For now, use Online mode on the same Wi-Fi — file data still goes peer-to-peer (not through the server).',
+        [
+          { text: 'OK' },
+          {
+            text: 'Use Online instead',
+            onPress: () => router.setParams({ mode: 'online' }),
+          },
+        ]
+      );
       return;
     }
 
@@ -116,7 +126,6 @@ export default function SendScreen() {
     setStatus('creating');
 
     const res = await createRoom('Android Device');
-
     if ('error' in res) {
       setError(res.error);
       setStatus('idle');
@@ -138,12 +147,24 @@ export default function SendScreen() {
   }
 
   function goToTransfer() {
+    activeRoomRef.current = false; // transfer screen owns the session now
     router.push({
       pathname: '/transfer',
       params: {
         role: 'sender',
         peerName: peerName || 'peer',
-        fileCount: String(files.length),
+        mode: mode || 'online',
+        filesJson: JSON.stringify(
+          files.map((f) => ({
+            id: f.id,
+            name: f.name,
+            size: f.size,
+            type: f.type || 'application/octet-stream',
+            uri: f.uri,
+            status: 'pending',
+            progress: 0,
+          }))
+        ),
       },
     });
   }
@@ -162,12 +183,11 @@ export default function SendScreen() {
 
       <View style={styles.section}>
         <Text style={styles.sectionTitle}>Files to send</Text>
-
         {files.length === 0 ? (
           <Text style={styles.empty}>No files selected</Text>
         ) : (
           files.map((f, i) => (
-            <View key={i} style={styles.fileRow}>
+            <View key={f.id} style={styles.fileRow}>
               <View style={{ flex: 1 }}>
                 <Text style={styles.fileName} numberOfLines={1}>{f.name}</Text>
                 <Text style={styles.fileSize}>{formatSize(f.size)}</Text>
@@ -180,7 +200,6 @@ export default function SendScreen() {
             </View>
           ))
         )}
-
         {status === 'idle' && (
           <Pressable style={styles.secondaryBtn} onPress={pickFiles}>
             <Text style={styles.secondaryBtnText}>+ Add Files</Text>
@@ -194,7 +213,9 @@ export default function SendScreen() {
           onPress={startSending}
           disabled={files.length === 0}
         >
-          <Text style={styles.primaryBtnText}>Create Pairing Code</Text>
+          <Text style={styles.primaryBtnText}>
+            {isOffline ? 'Start Offline Session' : 'Create Pairing Code'}
+          </Text>
         </Pressable>
       )}
 
@@ -209,25 +230,20 @@ export default function SendScreen() {
         <View style={styles.pairingBox}>
           <Text style={styles.pairingLabel}>Share this code with the receiver</Text>
           <Text style={styles.pairingCode}>{pairingCode}</Text>
-
           {status === 'waiting' && (
             <>
               <ActivityIndicator color="#3b82f6" style={{ marginTop: 16 }} />
-              <Text style={styles.statusText}>Waiting for receiver to join...</Text>
+              <Text style={styles.statusText}>Waiting for receiver...</Text>
             </>
           )}
-
           {status === 'connected' && (
             <>
-              <Text style={styles.connectedText}>
-                Connected to {peerName || 'peer'}
-              </Text>
+              <Text style={styles.connectedText}>Connected to {peerName || 'peer'}</Text>
               <Pressable style={[styles.primaryBtn, { marginTop: 20, width: '100%' }]} onPress={goToTransfer}>
                 <Text style={styles.primaryBtnText}>Start Transfer</Text>
               </Pressable>
             </>
           )}
-
           <Pressable style={styles.cancelBtn} onPress={cancel}>
             <Text style={styles.cancelText}>Cancel</Text>
           </Pressable>

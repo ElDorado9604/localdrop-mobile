@@ -47,7 +47,6 @@ export default function ReceiveScreen() {
     s.on('room:peer-left', onPeerLeft);
     s.on('room:cancelled', onCancelled);
 
-    // Cleanup ONLY on unmount
     return () => {
       s.off('room:peer-left', onPeerLeft);
       s.off('room:cancelled', onCancelled);
@@ -56,7 +55,7 @@ export default function ReceiveScreen() {
         activeRoomRef.current = false;
       }
     };
-  }, []); // empty deps
+  }, []);
 
   async function handleJoin() {
     const trimmed = code.trim().toUpperCase();
@@ -66,7 +65,10 @@ export default function ReceiveScreen() {
     }
 
     if (isOffline) {
-      Alert.alert('Coming soon', 'Offline mode (local discovery) will be added next.');
+      Alert.alert(
+        'Offline mode',
+        'Full offline discovery is in progress. Use Online mode on the same Wi-Fi — file bytes still go peer-to-peer.'
+      );
       return;
     }
 
@@ -96,12 +98,13 @@ export default function ReceiveScreen() {
   }
 
   function goToTransfer() {
+    activeRoomRef.current = false; // transfer screen owns the session
     router.push({
       pathname: '/transfer',
       params: {
         role: 'receiver',
         peerName: peerName || 'sender',
-        fileCount: '0',
+        mode: mode || 'online',
       },
     });
   }
@@ -115,7 +118,7 @@ export default function ReceiveScreen() {
       {status === 'idle' && (
         <>
           <Text style={styles.title}>Enter Pairing Code</Text>
-          <Text style={styles.hint}>Ask the sender for the 6-digit code</Text>
+          <Text style={styles.hint}>Ask the sender for the pairing code</Text>
 
           <TextInput
             style={styles.input}

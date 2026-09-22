@@ -1,16 +1,16 @@
 /**
- * LocalDrop WebRTC helpers for React Native.
- * Requires react-native-webrtc (development build only — does not work in Expo Go).
+ * WebRTC helpers for React Native (react-native-webrtc).
+ * Works only in development / production builds — NOT in Expo Go.
  */
 
 import {
   RTCPeerConnection,
   RTCIceCandidate,
   RTCSessionDescription,
-  mediaDevices,
 } from 'react-native-webrtc';
+import { CHUNK_SIZE } from './transferProtocol';
 
-export const CHUNK_SIZE = 64 * 1024;
+export { CHUNK_SIZE };
 export const BUFFERED_LOW_THRESHOLD = 256 * 1024;
 
 export const LOCAL_ICE_CONFIG = {
@@ -27,14 +27,12 @@ export function createPeerConnection(
 ): any {
   const pc = new RTCPeerConnection(LOCAL_ICE_CONFIG);
 
-  // @ts-ignore - react-native-webrtc event style
+  // @ts-expect-error RN event style
   pc.onicecandidate = (event: any) => {
-    if (event.candidate) {
-      onIceCandidate(event.candidate);
-    }
+    if (event.candidate) onIceCandidate(event.candidate);
   };
 
-  // @ts-ignore
+  // @ts-expect-error
   pc.onconnectionstatechange = () => {
     onConnectionStateChange(pc.connectionState);
   };
@@ -45,24 +43,35 @@ export function createPeerConnection(
 export function createDataChannel(pc: any): any {
   const channel = pc.createDataChannel('localdrop', { ordered: true });
   channel.binaryType = 'arraybuffer';
-  channel.bufferedAmountLowThreshold = BUFFERED_LOW_THRESHOLD;
+  try {
+    channel.bufferedAmountLowThreshold = BUFFERED_LOW_THRESHOLD;
+  } catch {
+    /* older RN webrtc */
+  }
   return channel;
 }
 
 export function waitForBuffer(channel: any): Promise<void> {
-  if (channel.bufferedAmount <= BUFFERED_LOW_THRESHOLD) {
+  if (!channel) return Promise.resolve();
+  if ((channel.bufferedAmount ?? 0) <= BUFFERED_LOW_THRESHOLD) {
     return Promise.resolve();
   }
   return new Promise((resolve) => {
-    const check = () => {
-      if (channel.bufferedAmount <= BUFFERED_LOW_THRESHOLD) {
+    const t = setInterval(() => {
+      if ((channel.bufferedAmount ?? 0) <= BUFFERED_LOW_THRESHOLD) {
+        clearInterval(t);
         resolve();
-      } else {
-        setTimeout(check, 50);
       }
-    };
-    check();
+    }, 40);
   });
 }
 
-export { RTCPeerConnection, RTCIceCandidate, RTCSessionDescription, mediaDevices };
+export { RTCPeerConnection, RTCIceCandidate, RTCSessionDescription };
+
+export function isWebRTCAvailable(): boolean {
+  try {
+    return typeof RTCPeerConnection !== 'undefined';
+  } catch {
+    return false;
+  }
+}

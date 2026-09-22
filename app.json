@@ -13,7 +13,12 @@
     },
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.eldorado.localdrop"
+      "bundleIdentifier": "com.eldorado.localdrop",
+      "infoPlist": {
+        "NSCameraUsageDescription": "Camera is used for offline QR pairing",
+        "NSLocalNetworkUsageDescription": "Local network is used for offline file transfer",
+        "NSBonjourServices": ["_localdrop._tcp"]
+      }
     },
     "android": {
       "adaptiveIcon": {
@@ -25,8 +30,10 @@
         "INTERNET",
         "ACCESS_NETWORK_STATE",
         "ACCESS_WIFI_STATE",
+        "CHANGE_WIFI_MULTICAST_STATE",
         "READ_EXTERNAL_STORAGE",
-        "WRITE_EXTERNAL_STORAGE"
+        "WRITE_EXTERNAL_STORAGE",
+        "CAMERA"
       ]
     },
     "web": {
@@ -34,7 +41,14 @@
     },
     "plugins": [
       "expo-router",
-      "expo-document-picker"
+      "expo-document-picker",
+      [
+        "@config-plugins/react-native-webrtc",
+        {
+          "cameraPermission": "Allow LocalDrop to access your camera for offline pairing",
+          "microphonePermission": false
+        }
+      ]
     ],
     "scheme": "localdrop",
     "experiments": {

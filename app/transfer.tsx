@@ -17,7 +17,6 @@ import {
   CHUNK_SIZE,
   ProtocolMessage,
   FileMeta,
-  randomId,
   formatBytes,
   formatSpeed,
 } from '../src/lib/transferProtocol';
@@ -49,41 +48,168 @@ export default function TransferScreen() {
   const [phase, setPhase] = useState<
     'connecting' | 'ready' | 'offering' | 'transferring' | 'completed' | 'failed'
   >('connecting');
-  const [channelOpen, setChannelOpen] = useState(false);
   const [queue, setQueue] = useState<QueuedFile[]>([]);
   const [bytesDone, setBytesDone] = useState(0);
   const [bytesTotal, setBytesTotal] = useState(0);
   const [speed, setSpeed] = useState(0);
-  const [offer, setOffer] = useState<{ files: FileMeta[]; totalSize: number; senderName: string } | null>(null);
+  const [offer, setOffer] = useState<{
+    files: FileMeta[];
+    totalSize: number;
+    senderName: string;
+  } | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const sessionRef = useRef<WebRTCSession | null>(null);
   const startTimeRef = useRef(0);
+  const queueRef = useRef<QueuedFile[]>([]);
+  const offerSentRef = useRef(false);
+  const cancelledRef = useRef(false);
   const incomingRef = useRef<
     Map<string, { meta: FileMeta; chunks: ArrayBuffer[]; received: number; totalChunks: number }>
   >(new Map());
-  const cancelledRef = useRef(false);
 
-  const updateFile = useCallback((id: string, patch: Partial<QueuedFile>) => {
-    setQueue((prev) => prev.map((f) => (f.id === id ? { ...f, ...patch } : f)));
-  }, []);
+  // Keep queueRef in sync
+  useEffect(() => {
+    queueRef.current = queue;
+  }, [queue]);
 
   // Init files for sender
   useEffect(() => {
     if (role === 'sender' && params.filesJson) {
       try {
-        const files = JSON.parse(params.filesJson) as QueuedFile[];
-        setQueue(files.map((f) => ({ ...f, status: 'pending', progress: 0 })));
-      } catch {
-        /* */
+        const files = JSON.parse(params.filesJson as string) as QueuedFile[];
+        const normalized = files.map((f) => ({
+          ...f,
+          status: 'pending' as const,
+          progress: 0,
+        }));
+        setQueue(normalized);
+        queueRef.current = normalized;
+      } catch (e) {
+        setError('Could not load file list');
       }
     }
   }, [role, params.filesJson]);
 
+  const updateFile = useCallback((id: string, patch: Partial<QueuedFile>) => {
+    setQueue((prev) => {
+      const next = prev.map((f) => (f.id === id ? { ...f, ...patch } : f));
+      queueRef.current = next;
+      return next;
+    });
+  }, []);
+
+  const runSend = useCallback(async () => {
+    const session = sessionRef.current;
+    if (!session) return;
+
+    const pending = queueRef.current.filter((f) => f.status === 'pending' && f.uri);
+    if (pending.length === 0) {
+      setError('No files to send (list empty). Go back and pick files again.');
+      setPhase('failed');
+      return;
+    }
+
+    setPhase('transferring');
+    emitTransferStarted();
+    startTimeRef.current = Date.now();
+    let done = 0;
+    const total = pending.reduce((s, f) => s + f.size, 0);
+    setBytesTotal(total);
+
+    for (let i = 0; i < pending.length; i++) {
+      if (cancelledRef.current) break;
+      const item = pending[i];
+      updateFile(item.id, { status: 'sending', progress: 0 });
+
+      session.sendJson({
+        type: 'file-start',
+        fileId: item.id,
+        name: item.name,
+        mime: item.type || 'application/octet-stream',
+        size: item.size,
+        lastModified: Date.now(),
+        index: i,
+        totalFiles: pending.length,
+      });
+
+      try {
+        const base64 = await FileSystem.readAsStringAsync(item.uri!, {
+          encoding: FileSystem.EncodingType.Base64,
+        });
+        const binary = atob(base64);
+        const totalChunks = Math.ceil(binary.length / CHUNK_SIZE) || 1;
+        let sent = 0;
+
+        for (let offset = 0; offset < binary.length; offset += CHUNK_SIZE) {
+          if (cancelledRef.current) break;
+          const slice = binary.slice(offset, offset + CHUNK_SIZE);
+          const buf = new Uint8Array(slice.length);
+          for (let j = 0; j < slice.length; j++) buf[j] = slice.charCodeAt(j);
+          await session.sendBinary(buf.buffer);
+          sent++;
+          done += buf.byteLength;
+          updateFile(item.id, { progress: Math.round((sent / totalChunks) * 100) });
+          setBytesDone(done);
+          const elapsed = (Date.now() - startTimeRef.current) / 1000;
+          if (elapsed > 0.2) setSpeed(done / elapsed);
+        }
+
+        session.sendJson({ type: 'file-complete', fileId: item.id });
+        updateFile(item.id, { status: 'completed', progress: 100 });
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : 'Send failed';
+        updateFile(item.id, { status: 'error', error: msg });
+        session.sendJson({ type: 'transfer-error', message: msg });
+        setPhase('failed');
+        setError(msg);
+        return;
+      }
+    }
+
+    if (!cancelledRef.current) {
+      session.sendJson({ type: 'transfer-complete' });
+      setPhase('completed');
+      session.markCompleted();
+      emitRoomComplete();
+    }
+  }, [updateFile]);
+
+  const sendTransferOffer = useCallback(() => {
+    const session = sessionRef.current;
+    if (!session || !session.isChannelOpen()) return;
+    if (offerSentRef.current) return;
+
+    const pending = queueRef.current.filter((f) => f.status === 'pending');
+    if (pending.length === 0) return;
+
+    const metas: FileMeta[] = pending.map((q) => ({
+      id: q.id,
+      name: q.name,
+      size: q.size,
+      type: q.type || 'application/octet-stream',
+    }));
+    const totalSize = metas.reduce((s, m) => s + m.size, 0);
+    setBytesTotal(totalSize);
+    offerSentRef.current = true;
+
+    const ok = session.sendJson({
+      type: 'transfer-offer',
+      files: metas,
+      totalSize,
+      senderName: 'Android Device',
+    });
+    if (!ok) {
+      offerSentRef.current = false;
+      setError('Data channel not ready');
+      return;
+    }
+    setPhase('transferring');
+  }, []);
+
   const handleProtocol = useCallback(
     async (data: ArrayBuffer | string) => {
       if (typeof data !== 'string') {
-        // binary chunk
         let activeId: string | null = null;
         for (const [id, buf] of incomingRef.current) {
           if (buf.received < buf.totalChunks) {
@@ -168,21 +294,10 @@ export default function TransferScreen() {
         const buf = incomingRef.current.get(msg.fileId);
         if (!buf) return;
         try {
-          // Write to cache directory
-          const dir = FileSystem.cacheDirectory + 'localdrop/';
+          const dir = (FileSystem.cacheDirectory || '') + 'localdrop/';
           await FileSystem.makeDirectoryAsync(dir, { intermediates: true }).catch(() => {});
           const path = dir + buf.meta.name.replace(/[^a-zA-Z0-9._-]/g, '_');
 
-          // Concatenate chunks as base64 in sequence for RN
-          let base64 = '';
-          for (const chunk of buf.chunks) {
-            const bytes = new Uint8Array(chunk);
-            let binary = '';
-            for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
-            base64 += btoa(binary);
-          }
-          // For large files this is memory-heavy; acceptable for MVP
-          // Better: write incrementally — simplified for now
           const full = buf.chunks.reduce((acc, c) => {
             const u = new Uint8Array(acc.byteLength + c.byteLength);
             u.set(new Uint8Array(acc), 0);
@@ -201,11 +316,7 @@ export default function TransferScreen() {
             encoding: FileSystem.EncodingType.Base64,
           });
 
-          updateFile(msg.fileId, {
-            status: 'completed',
-            progress: 100,
-            localPath: path,
-          });
+          updateFile(msg.fileId, { status: 'completed', progress: 100, localPath: path });
           incomingRef.current.delete(msg.fileId);
         } catch (e) {
           updateFile(msg.fileId, {
@@ -226,89 +337,21 @@ export default function TransferScreen() {
         setError(msg.message);
       }
     },
-    [updateFile]
+    [updateFile, runSend]
   );
-
-  const runSend = useCallback(async () => {
-    const session = sessionRef.current;
-    if (!session) return;
-    const pending = queue.filter((f) => f.status === 'pending' && f.uri);
-    if (pending.length === 0) return;
-
-    setPhase('transferring');
-    emitTransferStarted();
-    startTimeRef.current = Date.now();
-    let done = 0;
-    const total = pending.reduce((s, f) => s + f.size, 0);
-    setBytesTotal(total);
-
-    for (let i = 0; i < pending.length; i++) {
-      if (cancelledRef.current) break;
-      const item = pending[i];
-      updateFile(item.id, { status: 'sending', progress: 0 });
-
-      session.sendJson({
-        type: 'file-start',
-        fileId: item.id,
-        name: item.name,
-        mime: item.type || 'application/octet-stream',
-        size: item.size,
-        index: i,
-        totalFiles: pending.length,
-      });
-
-      try {
-        const base64 = await FileSystem.readAsStringAsync(item.uri!, {
-          encoding: FileSystem.EncodingType.Base64,
-        });
-        // decode base64 to binary in chunks
-        const binary = atob(base64);
-        const totalChunks = Math.ceil(binary.length / CHUNK_SIZE) || 1;
-        let sent = 0;
-
-        for (let offset = 0; offset < binary.length; offset += CHUNK_SIZE) {
-          if (cancelledRef.current) break;
-          const slice = binary.slice(offset, offset + CHUNK_SIZE);
-          const buf = new Uint8Array(slice.length);
-          for (let j = 0; j < slice.length; j++) buf[j] = slice.charCodeAt(j);
-          await session.sendBinary(buf.buffer);
-          sent++;
-          done += buf.byteLength;
-          updateFile(item.id, {
-            progress: Math.round((sent / totalChunks) * 100),
-          });
-          setBytesDone(done);
-          const elapsed = (Date.now() - startTimeRef.current) / 1000;
-          if (elapsed > 0.2) setSpeed(done / elapsed);
-        }
-
-        session.sendJson({ type: 'file-complete', fileId: item.id });
-        updateFile(item.id, { status: 'completed', progress: 100 });
-      } catch (e) {
-        updateFile(item.id, {
-          status: 'error',
-          error: e instanceof Error ? e.message : 'Send failed',
-        });
-        session.sendJson({ type: 'transfer-error', message: 'Send failed' });
-        setPhase('failed');
-        return;
-      }
-    }
-
-    if (!cancelledRef.current) {
-      session.sendJson({ type: 'transfer-complete' });
-      setPhase('completed');
-      session.markCompleted();
-      emitRoomComplete();
-    }
-  }, [queue, updateFile]);
 
   // Setup WebRTC + signaling
   useEffect(() => {
-    if (!isWebRTCAvailableSafe()) {
-      setError(
-        'WebRTC is not available. Install a development build (APK), not Expo Go.'
-      );
+    let available = false;
+    try {
+      require('react-native-webrtc');
+      available = true;
+    } catch {
+      available = false;
+    }
+
+    if (!available) {
+      setError('WebRTC is not available. Use the latest development APK, not Expo Go.');
       setPhase('failed');
       return;
     }
@@ -323,12 +366,15 @@ export default function TransferScreen() {
 
     session.setHandlers({
       onOpen: () => {
-        setChannelOpen(true);
         setPhase('ready');
         setError(null);
+        // Auto-send transfer offer shortly after channel opens (sender only)
+        if (role === 'sender') {
+          setTimeout(() => sendTransferOffer(), 400);
+        }
       },
       onMessage: (data) => void handleProtocol(data),
-      onClose: () => setChannelOpen(false),
+      onClose: () => {},
       onFailed: (reason) => {
         setError(reason);
         setPhase('failed');
@@ -350,7 +396,6 @@ export default function TransferScreen() {
       s.on('signal:ice-candidate', onIce);
     }
 
-    // Sender creates offer after short delay
     if (role === 'sender') {
       setTimeout(() => void session.createOffer(), 500);
     }
@@ -365,34 +410,6 @@ export default function TransferScreen() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  function startSendOffer() {
-    const session = sessionRef.current;
-    if (!session || !session.isChannelOpen()) {
-      Alert.alert('Not ready', 'Wait until the connection is ready.');
-      return;
-    }
-    const pending = queue.filter((f) => f.status === 'pending');
-    if (pending.length === 0) {
-      Alert.alert('No files', 'No files to send.');
-      return;
-    }
-    const metas: FileMeta[] = pending.map((q) => ({
-      id: q.id,
-      name: q.name,
-      size: q.size,
-      type: q.type || 'application/octet-stream',
-    }));
-    const totalSize = metas.reduce((s, m) => s + m.size, 0);
-    setBytesTotal(totalSize);
-    setPhase('transferring');
-    session.sendJson({
-      type: 'transfer-offer',
-      files: metas,
-      totalSize,
-      senderName: 'Android Device',
-    });
-  }
 
   function acceptOffer() {
     sessionRef.current?.sendJson({ type: 'transfer-accepted' });
@@ -420,10 +437,9 @@ export default function TransferScreen() {
 
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.content}>
-      <Text style={styles.title}>
-        {role === 'sender' ? 'Sending' : 'Receiving'}
-      </Text>
+      <Text style={styles.title}>{role === 'sender' ? 'Sending' : 'Receiving'}</Text>
       <Text style={styles.peer}>Peer: {peerName}</Text>
+      <Text style={styles.wifiHint}>Both devices must be on the same Wi‑Fi (not 4G/5G).</Text>
 
       {phase === 'connecting' && (
         <View style={styles.center}>
@@ -436,7 +452,7 @@ export default function TransferScreen() {
         <View style={styles.center}>
           <Text style={styles.ready}>Connected — ready to transfer</Text>
           {role === 'sender' && (
-            <Pressable style={styles.primaryBtn} onPress={startSendOffer}>
+            <Pressable style={styles.primaryBtn} onPress={sendTransferOffer}>
               <Text style={styles.primaryBtnText}>Send Files</Text>
             </Pressable>
           )}
@@ -500,10 +516,7 @@ export default function TransferScreen() {
         </View>
       )}
 
-      {phase === 'completed' && (
-        <Text style={styles.done}>Transfer complete</Text>
-      )}
-
+      {phase === 'completed' && <Text style={styles.done}>Transfer complete</Text>}
       {error && <Text style={styles.error}>{error}</Text>}
 
       <Pressable style={styles.homeBtn} onPress={() => router.replace('/')}>
@@ -513,21 +526,12 @@ export default function TransferScreen() {
   );
 }
 
-function isWebRTCAvailableSafe() {
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    require('react-native-webrtc');
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#0f0f0f' },
   content: { padding: 24, paddingBottom: 48 },
   title: { color: '#fff', fontSize: 22, fontWeight: '700', textAlign: 'center' },
-  peer: { color: '#3b82f6', textAlign: 'center', marginBottom: 24 },
+  peer: { color: '#3b82f6', textAlign: 'center', marginBottom: 8 },
+  wifiHint: { color: '#fbbf24', fontSize: 12, textAlign: 'center', marginBottom: 20 },
   center: { alignItems: 'center', marginVertical: 24 },
   status: { color: '#aaa', marginTop: 12 },
   ready: { color: '#22c55e', fontWeight: '600', marginBottom: 16 },
@@ -567,12 +571,7 @@ const styles = StyleSheet.create({
   },
   cancelText: { color: '#ef4444' },
   progressBox: { marginVertical: 16 },
-  barBg: {
-    height: 8,
-    backgroundColor: '#333',
-    borderRadius: 4,
-    overflow: 'hidden',
-  },
+  barBg: { height: 8, backgroundColor: '#333', borderRadius: 4, overflow: 'hidden' },
   barFill: { height: '100%', backgroundColor: '#3b82f6' },
   stats: { color: '#fff', marginTop: 8, textAlign: 'center' },
   speed: { color: '#888', textAlign: 'center', marginTop: 4 },
@@ -588,13 +587,7 @@ const styles = StyleSheet.create({
   fileName: { color: '#fff' },
   fileMeta: { color: '#888', fontSize: 12, marginTop: 2 },
   share: { color: '#3b82f6', fontWeight: '600' },
-  done: {
-    color: '#22c55e',
-    textAlign: 'center',
-    fontSize: 18,
-    fontWeight: '700',
-    marginTop: 16,
-  },
+  done: { color: '#22c55e', textAlign: 'center', fontSize: 18, fontWeight: '700', marginTop: 16 },
   error: { color: '#ef4444', textAlign: 'center', marginTop: 12 },
   homeBtn: {
     marginTop: 32,

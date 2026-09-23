@@ -6,7 +6,6 @@ import {
   Pressable,
   ScrollView,
   ActivityIndicator,
-  Platform,
 } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import * as FileSystem from 'expo-file-system/legacy';
@@ -25,11 +24,7 @@ import {
   formatBytes,
   formatSpeed,
 } from '../src/lib/transferProtocol';
-import {
-  saveReceivedFile,
-  requestPublicLocalDropFolder,
-  hasPublicLocalDropFolder,
-} from '../src/lib/saveReceivedFile';
+import { saveReceivedFile, ensureAppLocalDropDir } from '../src/lib/saveReceivedFile';
 
 type QueuedFile = {
   id: string;
@@ -84,19 +79,10 @@ export default function TransferScreen() {
     queueRef.current = queue;
   }, [queue]);
 
-  // On Android, once offer to use a public LocalDrop folder (visible in Files app)
+  // Ensure LocalDrop exists before any receive
   useEffect(() => {
-    if (role !== 'receiver' || Platform.OS !== 'android') return;
-    void (async () => {
-      const has = await hasPublicLocalDropFolder();
-      if (!has) {
-        // Soft prompt only once per session via saveHint after first file
-        setSaveHint(
-          'Files save to LocalDrop on this device. Optional: choose a public folder in settings later.'
-        );
-      }
-    })();
-  }, [role]);
+    void ensureAppLocalDropDir();
+  }, []);
 
   useEffect(() => {
     if (role === 'sender' && params.filesJson) {
@@ -333,7 +319,12 @@ export default function TransferScreen() {
           }
           const b64 = btoa(bin);
 
-          const saved = await saveReceivedFile(buf.meta.name, b64, buf.meta.type);
+          const saved = await saveReceivedFile(
+            buf.meta.name,
+            b64,
+            buf.meta.type,
+            buf.meta.size
+          );
           updateFile(msg.fileId, {
             status: 'completed',
             progress: 100,
@@ -471,13 +462,6 @@ export default function TransferScreen() {
     setPhase('ready');
   }
 
-  async function choosePublicFolder() {
-    const ok = await requestPublicLocalDropFolder();
-    if (ok) {
-      setSaveHint('Public LocalDrop folder set. New files will also appear there.');
-    }
-  }
-
   const progress =
     bytesTotal > 0 ? Math.min(100, Math.round((bytesDone / bytesTotal) * 100)) : 0;
 
@@ -563,17 +547,22 @@ export default function TransferScreen() {
       )}
 
       {phase === 'completed' && (
-        <Text style={styles.done}>
-          {role === 'receiver' ? 'Saved to LocalDrop folder' : 'Transfer complete'}
-        </Text>
+        <>
+          <Text style={styles.done}>
+            {role === 'receiver' ? 'Saved to LocalDrop folder' : 'Transfer complete'}
+          </Text>
+          {role === 'receiver' && (
+            <Pressable
+              style={styles.receivedBtn}
+              onPress={() => router.replace('/received')}
+            >
+              <Text style={styles.receivedBtnText}>View Files Received</Text>
+            </Pressable>
+          )}
+        </>
       )}
       {saveHint && role === 'receiver' && (
         <Text style={styles.saveHint}>{saveHint}</Text>
-      )}
-      {role === 'receiver' && Platform.OS === 'android' && (
-        <Pressable style={styles.folderBtn} onPress={choosePublicFolder}>
-          <Text style={styles.folderBtnText}>Choose public LocalDrop folder</Text>
-        </Pressable>
       )}
       {error && <Text style={styles.error}>{error}</Text>}
 
@@ -647,15 +636,14 @@ const styles = StyleSheet.create({
   savedBadge: { color: '#22c55e', fontWeight: '700', fontSize: 12 },
   done: { color: '#22c55e', textAlign: 'center', fontSize: 18, fontWeight: '700', marginTop: 16 },
   saveHint: { color: '#94a3b8', textAlign: 'center', fontSize: 12, marginTop: 8 },
-  folderBtn: {
+  receivedBtn: {
     marginTop: 16,
-    borderWidth: 1,
-    borderColor: '#333',
+    backgroundColor: '#3b82f6',
     borderRadius: 12,
-    paddingVertical: 12,
+    paddingVertical: 14,
     alignItems: 'center',
   },
-  folderBtnText: { color: '#3b82f6', fontSize: 13 },
+  receivedBtnText: { color: '#fff', fontWeight: '600' },
   error: { color: '#ef4444', textAlign: 'center', marginTop: 12 },
   homeBtn: {
     marginTop: 32,

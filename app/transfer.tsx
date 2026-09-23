@@ -9,10 +9,15 @@ import {
   ActivityIndicator,
 } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
-// SDK 54+: old API moved to legacy — required for readAsStringAsync / writeAsStringAsync
 import * as FileSystem from 'expo-file-system/legacy';
 import * as Sharing from 'expo-sharing';
-import { getSocket, sendSignal, emitTransferStarted, emitRoomComplete } from '../src/lib/socket';
+import {
+  getSocket,
+  sendSignal,
+  emitTransferStarted,
+  emitRoomComplete,
+  takePendingSignals,
+} from '../src/lib/socket';
 import { WebRTCSession } from '../src/lib/webrtcSession';
 import {
   CHUNK_SIZE,
@@ -388,13 +393,43 @@ export default function TransferScreen() {
     const onIce = (p: { candidate: any }) => void session.handleIce(p.candidate);
 
     if (mode === 'online') {
+      // Replace buffer listeners with live session handlers
+      s.off('signal:offer');
+      s.off('signal:answer');
+      s.off('signal:ice-candidate');
       s.on('signal:offer', onOffer);
       s.on('signal:answer', onAnswer);
       s.on('signal:ice-candidate', onIce);
+
+      // Replay anything that arrived while Receive was joining
+      const pending = takePendingSignals();
+      for (const sig of pending) {
+        if (sig.type === 'offer') void session.handleOffer(sig.sdp);
+        else if (sig.type === 'answer') void session.handleAnswer(sig.sdp);
+        else void session.handleIce(sig.candidate);
+      }
     }
 
+    // Sender always creates the offer. Receiver only answers (or replays buffered offer).
     if (role === 'sender') {
       setTimeout(() => void session.createOffer(), 500);
+    } else if (role === 'receiver' && mode === 'online') {
+      // If web's offer never arrives (edge race), try becoming initiator after 3s.
+      // Web SendPage also handles incoming offers, so this can still connect.
+      const fallback = setTimeout(() => {
+        if (!session.isChannelOpen() && sessionRef.current) {
+          void session.createOffer();
+        }
+      }, 3000);
+      return () => {
+        clearTimeout(fallback);
+        if (mode === 'online') {
+          s.off('signal:offer', onOffer);
+          s.off('signal:answer', onAnswer);
+          s.off('signal:ice-candidate', onIce);
+        }
+        session.close();
+      };
     }
 
     return () => {
@@ -442,6 +477,11 @@ export default function TransferScreen() {
         <View style={styles.center}>
           <ActivityIndicator color="#3b82f6" size="large" />
           <Text style={styles.status}>Connecting WebRTC...</Text>
+          <Text style={styles.subHint}>
+            {role === 'receiver'
+              ? 'Waiting for sender link. Keep both screens open.'
+              : 'Setting up peer connection...'}
+          </Text>
         </View>
       )}
 
@@ -531,6 +571,7 @@ const styles = StyleSheet.create({
   wifiHint: { color: '#fbbf24', fontSize: 12, textAlign: 'center', marginBottom: 20 },
   center: { alignItems: 'center', marginVertical: 24 },
   status: { color: '#aaa', marginTop: 12 },
+  subHint: { color: '#666', fontSize: 12, marginTop: 8, textAlign: 'center' },
   ready: { color: '#22c55e', fontWeight: '600', marginBottom: 16 },
   hint: { color: '#888', marginTop: 8 },
   primaryBtn: {

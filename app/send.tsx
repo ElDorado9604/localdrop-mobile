@@ -13,6 +13,7 @@ import { useLocalSearchParams, useRouter } from 'expo-router';
 import * as DocumentPicker from 'expo-document-picker';
 import { createRoom, cancelRoom, getSocket } from '../src/lib/socket';
 import { randomId } from '../src/lib/transferProtocol';
+import { buildJoinUrl } from '../src/lib/config';
 
 type FileInfo = {
   id: string;
@@ -174,8 +175,10 @@ export default function SendScreen() {
     return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
   }
 
-  const qrUrl = pairingCode
-    ? `https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(pairingCode)}`
+  // Same join URL as the web app QR — camera opens web receive with code filled in
+  const joinUrl = pairingCode ? buildJoinUrl(pairingCode) : null;
+  const qrImageUrl = joinUrl
+    ? `https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(joinUrl)}`
     : null;
 
   return (
@@ -238,10 +241,13 @@ export default function SendScreen() {
           <Text style={styles.pairingLabel}>Share this code with the receiver</Text>
           <Text style={styles.pairingCode}>{pairingCode}</Text>
 
-          {qrUrl && (
+          {qrImageUrl && (
             <View style={styles.qrWrap}>
-              <Image source={{ uri: qrUrl }} style={styles.qr} />
-              <Text style={styles.qrHint}>Scan with the web app camera / QR scanner</Text>
+              <Image source={{ uri: qrImageUrl }} style={styles.qr} />
+              <Text style={styles.qrHint}>
+                Scan to open LocalDrop web with code filled in{'\n'}
+                (or type the code in the mobile Receive screen)
+              </Text>
             </View>
           )}
 
@@ -329,7 +335,7 @@ const styles = StyleSheet.create({
   },
   qrWrap: { marginTop: 20, alignItems: 'center' },
   qr: { width: 180, height: 180, borderRadius: 8, backgroundColor: '#fff' },
-  qrHint: { color: '#888', fontSize: 12, marginTop: 8 },
+  qrHint: { color: '#888', fontSize: 12, marginTop: 8, textAlign: 'center', lineHeight: 18 },
   connectedText: { color: '#22c55e', marginTop: 16, fontWeight: '600' },
   cancelBtn: { marginTop: 20 },
   cancelText: { color: '#ef4444' },

@@ -7,9 +7,11 @@ import {
   TextInput,
   ActivityIndicator,
   Alert,
+  Platform,
 } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { joinRoom, cancelRoom, getSocket } from '../src/lib/socket';
+import { hasSaveDirectory, setupPublicSaveFolder } from '../src/lib/saveReceivedFile';
 
 export default function ReceiveScreen() {
   const { mode } = useLocalSearchParams<{ mode: string }>();
@@ -75,10 +77,39 @@ export default function ReceiveScreen() {
     });
   }
 
+  async function ensureFolder(): Promise<boolean> {
+    if (await hasSaveDirectory()) return true;
+    if (Platform.OS !== 'android') {
+      return setupPublicSaveFolder();
+    }
+    return new Promise((resolve) => {
+      Alert.alert(
+        'Set save folder',
+        'Pick a location such as Downloads. LocalDrop will create a LocalDrop folder when possible. Do this before connecting so the transfer stays stable.',
+        [
+          { text: 'Cancel', style: 'cancel', onPress: () => resolve(false) },
+          {
+            text: 'Choose',
+            onPress: async () => {
+              const ok = await setupPublicSaveFolder();
+              resolve(ok);
+            },
+          },
+        ]
+      );
+    });
+  }
+
   async function handleJoin() {
     const trimmed = code.replace(/\D/g, '').slice(0, 6);
     if (trimmed.length !== 6) {
       Alert.alert('Invalid code', 'Enter the 6-digit pairing code from the sender');
+      return;
+    }
+
+    const folderOk = await ensureFolder();
+    if (!folderOk) {
+      setError('Save folder is required before receiving files.');
       return;
     }
 

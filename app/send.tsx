@@ -7,6 +7,7 @@ import {
   ActivityIndicator,
   ScrollView,
   Alert,
+  Image,
 } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import * as DocumentPicker from 'expo-document-picker';
@@ -106,8 +107,6 @@ export default function SendScreen() {
     }
 
     if (isOffline) {
-      // Offline: skip server, go straight to transfer screen
-      // True offline discovery needs a new APK; for now use online signaling on same WiFi
       Alert.alert(
         'Offline mode',
         'Full offline discovery is in progress. For now, use Online mode on the same Wi-Fi — file data still goes peer-to-peer (not through the server).',
@@ -147,7 +146,7 @@ export default function SendScreen() {
   }
 
   function goToTransfer() {
-    activeRoomRef.current = false; // transfer screen owns the session now
+    activeRoomRef.current = false;
     router.push({
       pathname: '/transfer',
       params: {
@@ -175,10 +174,18 @@ export default function SendScreen() {
     return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
   }
 
+  const qrUrl = pairingCode
+    ? `https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(pairingCode)}`
+    : null;
+
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.content}>
       <Text style={styles.modeLabel}>
         Mode: {isOffline ? 'Offline (Local Discovery)' : 'Online (Signaling Server)'}
+      </Text>
+
+      <Text style={styles.wifiHint}>
+        Both devices must be on the same Wi‑Fi (not mobile data).
       </Text>
 
       <View style={styles.section}>
@@ -230,6 +237,14 @@ export default function SendScreen() {
         <View style={styles.pairingBox}>
           <Text style={styles.pairingLabel}>Share this code with the receiver</Text>
           <Text style={styles.pairingCode}>{pairingCode}</Text>
+
+          {qrUrl && (
+            <View style={styles.qrWrap}>
+              <Image source={{ uri: qrUrl }} style={styles.qr} />
+              <Text style={styles.qrHint}>Scan with the web app camera / QR scanner</Text>
+            </View>
+          )}
+
           {status === 'waiting' && (
             <>
               <ActivityIndicator color="#3b82f6" style={{ marginTop: 16 }} />
@@ -258,7 +273,13 @@ export default function SendScreen() {
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#0f0f0f' },
   content: { padding: 24, paddingBottom: 48 },
-  modeLabel: { color: '#3b82f6', marginBottom: 24, textAlign: 'center' },
+  modeLabel: { color: '#3b82f6', marginBottom: 8, textAlign: 'center' },
+  wifiHint: {
+    color: '#fbbf24',
+    fontSize: 12,
+    textAlign: 'center',
+    marginBottom: 20,
+  },
   section: { marginBottom: 24 },
   sectionTitle: { color: '#fff', fontSize: 16, fontWeight: '600', marginBottom: 12 },
   empty: { color: '#666', marginBottom: 12 },
@@ -306,6 +327,9 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     letterSpacing: 6,
   },
+  qrWrap: { marginTop: 20, alignItems: 'center' },
+  qr: { width: 180, height: 180, borderRadius: 8, backgroundColor: '#fff' },
+  qrHint: { color: '#888', fontSize: 12, marginTop: 8 },
   connectedText: { color: '#22c55e', marginTop: 16, fontWeight: '600' },
   cancelBtn: { marginTop: 20 },
   cancelText: { color: '#ef4444' },

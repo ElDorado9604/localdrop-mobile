@@ -5,12 +5,11 @@ import {
   StyleSheet,
   Pressable,
   ScrollView,
-  Alert,
   ActivityIndicator,
+  Platform,
 } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import * as FileSystem from 'expo-file-system/legacy';
-import * as Sharing from 'expo-sharing';
 import {
   getSocket,
   sendSignal,
@@ -26,6 +25,11 @@ import {
   formatBytes,
   formatSpeed,
 } from '../src/lib/transferProtocol';
+import {
+  saveReceivedFile,
+  requestPublicLocalDropFolder,
+  hasPublicLocalDropFolder,
+} from '../src/lib/saveReceivedFile';
 
 type QueuedFile = {
   id: string;
@@ -37,6 +41,7 @@ type QueuedFile = {
   progress: number;
   error?: string;
   localPath?: string;
+  displayPath?: string;
 };
 
 export default function TransferScreen() {
@@ -64,6 +69,7 @@ export default function TransferScreen() {
     senderName: string;
   } | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [saveHint, setSaveHint] = useState<string | null>(null);
 
   const sessionRef = useRef<WebRTCSession | null>(null);
   const startTimeRef = useRef(0);
@@ -77,6 +83,20 @@ export default function TransferScreen() {
   useEffect(() => {
     queueRef.current = queue;
   }, [queue]);
+
+  // On Android, once offer to use a public LocalDrop folder (visible in Files app)
+  useEffect(() => {
+    if (role !== 'receiver' || Platform.OS !== 'android') return;
+    void (async () => {
+      const has = await hasPublicLocalDropFolder();
+      if (!has) {
+        // Soft prompt only once per session via saveHint after first file
+        setSaveHint(
+          'Files save to LocalDrop on this device. Optional: choose a public folder in settings later.'
+        );
+      }
+    })();
+  }, [role]);
 
   useEffect(() => {
     if (role === 'sender' && params.filesJson) {
@@ -298,10 +318,6 @@ export default function TransferScreen() {
         const buf = incomingRef.current.get(msg.fileId);
         if (!buf) return;
         try {
-          const dir = (FileSystem.cacheDirectory || '') + 'localdrop/';
-          await FileSystem.makeDirectoryAsync(dir, { intermediates: true }).catch(() => {});
-          const path = dir + buf.meta.name.replace(/[^a-zA-Z0-9._-]/g, '_');
-
           const full = buf.chunks.reduce((acc, c) => {
             const u = new Uint8Array(acc.byteLength + c.byteLength);
             u.set(new Uint8Array(acc), 0);
@@ -316,11 +332,15 @@ export default function TransferScreen() {
             bin += String.fromCharCode(...bytes.subarray(i, i + step));
           }
           const b64 = btoa(bin);
-          await FileSystem.writeAsStringAsync(path, b64, {
-            encoding: FileSystem.EncodingType.Base64,
-          });
 
-          updateFile(msg.fileId, { status: 'completed', progress: 100, localPath: path });
+          const saved = await saveReceivedFile(buf.meta.name, b64, buf.meta.type);
+          updateFile(msg.fileId, {
+            status: 'completed',
+            progress: 100,
+            localPath: saved.path,
+            displayPath: saved.displayPath,
+          });
+          setSaveHint(`Saved to ${saved.displayPath}`);
           incomingRef.current.delete(msg.fileId);
         } catch (e) {
           updateFile(msg.fileId, {
@@ -393,7 +413,6 @@ export default function TransferScreen() {
     const onIce = (p: { candidate: any }) => void session.handleIce(p.candidate);
 
     if (mode === 'online') {
-      // Replace buffer listeners with live session handlers
       s.off('signal:offer');
       s.off('signal:answer');
       s.off('signal:ice-candidate');
@@ -401,7 +420,6 @@ export default function TransferScreen() {
       s.on('signal:answer', onAnswer);
       s.on('signal:ice-candidate', onIce);
 
-      // Replay anything that arrived while Receive was joining
       const pending = takePendingSignals();
       for (const sig of pending) {
         if (sig.type === 'offer') void session.handleOffer(sig.sdp);
@@ -410,12 +428,9 @@ export default function TransferScreen() {
       }
     }
 
-    // Sender always creates the offer. Receiver only answers (or replays buffered offer).
     if (role === 'sender') {
       setTimeout(() => void session.createOffer(), 500);
     } else if (role === 'receiver' && mode === 'online') {
-      // If web's offer never arrives (edge race), try becoming initiator after 3s.
-      // Web SendPage also handles incoming offers, so this can still connect.
       const fallback = setTimeout(() => {
         if (!session.isChannelOpen() && sessionRef.current) {
           void session.createOffer();
@@ -456,11 +471,10 @@ export default function TransferScreen() {
     setPhase('ready');
   }
 
-  async function shareFile(path: string) {
-    if (await Sharing.isAvailableAsync()) {
-      await Sharing.shareAsync(path);
-    } else {
-      Alert.alert('Saved', path);
+  async function choosePublicFolder() {
+    const ok = await requestPublicLocalDropFolder();
+    if (ok) {
+      setSaveHint('Public LocalDrop folder set. New files will also appear there.');
     }
   }
 
@@ -477,11 +491,6 @@ export default function TransferScreen() {
         <View style={styles.center}>
           <ActivityIndicator color="#3b82f6" size="large" />
           <Text style={styles.status}>Connecting WebRTC...</Text>
-          <Text style={styles.subHint}>
-            {role === 'receiver'
-              ? 'Waiting for sender link. Keep both screens open.'
-              : 'Setting up peer connection...'}
-          </Text>
         </View>
       )}
 
@@ -540,20 +549,32 @@ export default function TransferScreen() {
               <View style={{ flex: 1 }}>
                 <Text style={styles.fileName} numberOfLines={1}>{f.name}</Text>
                 <Text style={styles.fileMeta}>
-                  {f.status} · {f.progress}% · {formatBytes(f.size)}
+                  {f.status === 'completed'
+                    ? `Saved · ${f.displayPath || 'LocalDrop/' + f.name}`
+                    : `${f.status} · ${f.progress}% · ${formatBytes(f.size)}`}
                 </Text>
               </View>
-              {f.status === 'completed' && f.localPath && (
-                <Pressable onPress={() => shareFile(f.localPath!)}>
-                  <Text style={styles.share}>Share</Text>
-                </Pressable>
+              {f.status === 'completed' && (
+                <Text style={styles.savedBadge}>Saved</Text>
               )}
             </View>
           ))}
         </View>
       )}
 
-      {phase === 'completed' && <Text style={styles.done}>Transfer complete</Text>}
+      {phase === 'completed' && (
+        <Text style={styles.done}>
+          {role === 'receiver' ? 'Saved to LocalDrop folder' : 'Transfer complete'}
+        </Text>
+      )}
+      {saveHint && role === 'receiver' && (
+        <Text style={styles.saveHint}>{saveHint}</Text>
+      )}
+      {role === 'receiver' && Platform.OS === 'android' && (
+        <Pressable style={styles.folderBtn} onPress={choosePublicFolder}>
+          <Text style={styles.folderBtnText}>Choose public LocalDrop folder</Text>
+        </Pressable>
+      )}
       {error && <Text style={styles.error}>{error}</Text>}
 
       <Pressable style={styles.homeBtn} onPress={() => router.replace('/')}>
@@ -571,7 +592,6 @@ const styles = StyleSheet.create({
   wifiHint: { color: '#fbbf24', fontSize: 12, textAlign: 'center', marginBottom: 20 },
   center: { alignItems: 'center', marginVertical: 24 },
   status: { color: '#aaa', marginTop: 12 },
-  subHint: { color: '#666', fontSize: 12, marginTop: 8, textAlign: 'center' },
   ready: { color: '#22c55e', fontWeight: '600', marginBottom: 16 },
   hint: { color: '#888', marginTop: 8 },
   primaryBtn: {
@@ -624,8 +644,18 @@ const styles = StyleSheet.create({
   },
   fileName: { color: '#fff' },
   fileMeta: { color: '#888', fontSize: 12, marginTop: 2 },
-  share: { color: '#3b82f6', fontWeight: '600' },
+  savedBadge: { color: '#22c55e', fontWeight: '700', fontSize: 12 },
   done: { color: '#22c55e', textAlign: 'center', fontSize: 18, fontWeight: '700', marginTop: 16 },
+  saveHint: { color: '#94a3b8', textAlign: 'center', fontSize: 12, marginTop: 8 },
+  folderBtn: {
+    marginTop: 16,
+    borderWidth: 1,
+    borderColor: '#333',
+    borderRadius: 12,
+    paddingVertical: 12,
+    alignItems: 'center',
+  },
+  folderBtnText: { color: '#3b82f6', fontSize: 13 },
   error: { color: '#ef4444', textAlign: 'center', marginTop: 12 },
   homeBtn: {
     marginTop: 32,

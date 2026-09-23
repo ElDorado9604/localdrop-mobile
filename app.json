@@ -17,7 +17,9 @@
       "infoPlist": {
         "NSCameraUsageDescription": "Camera is used for offline QR pairing",
         "NSMicrophoneUsageDescription": "Microphone may be used for WebRTC",
-        "NSLocalNetworkUsageDescription": "Local network is used for offline file transfer"
+        "NSLocalNetworkUsageDescription": "Local network is used for offline file transfer",
+        "UIFileSharingEnabled": true,
+        "LSSupportsOpeningDocumentsInPlace": true
       }
     },
     "android": {

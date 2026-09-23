@@ -15,8 +15,9 @@ import * as FileSystem from 'expo-file-system/legacy';
 import {
   listReceivedFiles,
   removeFromReceivedIndex,
-  requestPublicLocalDropFolder,
-  hasPublicLocalDropFolder,
+  setupPublicSaveFolder,
+  hasSaveDirectory,
+  getSaveDirectoryLabel,
   type ReceivedFileRecord,
 } from '../src/lib/saveReceivedFile';
 
@@ -37,12 +38,13 @@ function formatWhen(ts: number) {
 export default function ReceivedScreen() {
   const [files, setFiles] = useState<ReceivedFileRecord[]>([]);
   const [refreshing, setRefreshing] = useState(false);
-  const [hasPublic, setHasPublic] = useState(false);
+  const [hasFolder, setHasFolder] = useState(false);
+  const [label, setLabel] = useState('LocalDrop');
 
   const load = useCallback(async () => {
-    const list = await listReceivedFiles();
-    setFiles(list);
-    setHasPublic(await hasPublicLocalDropFolder());
+    setFiles(await listReceivedFiles());
+    setHasFolder(await hasSaveDirectory());
+    setLabel(await getSaveDirectoryLabel());
   }, []);
 
   useFocusEffect(
@@ -59,6 +61,12 @@ export default function ReceivedScreen() {
 
   async function openOrShare(item: ReceivedFileRecord) {
     try {
+      if (item.path.startsWith('content://') || item.path.startsWith('file://')) {
+        if (await Sharing.isAvailableAsync()) {
+          await Sharing.shareAsync(item.path);
+          return;
+        }
+      }
       const info = await FileSystem.getInfoAsync(item.path);
       if (!info.exists) {
         Alert.alert('Missing', 'File is no longer on this device.');
@@ -76,30 +84,27 @@ export default function ReceivedScreen() {
     }
   }
 
-  async function setPublicFolder() {
-    const ok = await requestPublicLocalDropFolder();
+  async function setFolder() {
+    const ok = await setupPublicSaveFolder();
     if (ok) {
-      Alert.alert(
-        'Folder set',
-        'New received files will also be copied to the folder you selected.'
-      );
-      setHasPublic(true);
+      Alert.alert('Folder set', 'New files will be saved there (visible in Files).');
+      await load();
     }
   }
 
   return (
     <View style={styles.container}>
       <Text style={styles.subtitle}>
-        Files saved to LocalDrop on this device (newest first)
+        {hasFolder
+          ? `Only LocalDrop receives · ${label}`
+          : 'Set a save folder to store received files in the system Files app'}
       </Text>
 
-      {Platform.OS === 'android' && (
-        <Pressable style={styles.folderBtn} onPress={setPublicFolder}>
-          <Text style={styles.folderBtnText}>
-            {hasPublic ? 'Change public LocalDrop folder' : 'Choose public LocalDrop folder'}
-          </Text>
-        </Pressable>
-      )}
+      <Pressable style={styles.folderBtn} onPress={setFolder}>
+        <Text style={styles.folderBtnText}>
+          {hasFolder ? 'Change save folder' : 'Choose save folder'}
+        </Text>
+      </Pressable>
 
       <FlatList
         data={files}
@@ -108,7 +113,7 @@ export default function ReceivedScreen() {
           <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#3b82f6" />
         }
         ListEmptyComponent={
-          <Text style={styles.empty}>No files received yet</Text>
+          <Text style={styles.empty}>No files received via LocalDrop yet</Text>
         }
         contentContainerStyle={styles.list}
         renderItem={({ item }) => (

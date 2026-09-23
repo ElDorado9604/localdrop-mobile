@@ -11,9 +11,9 @@ import {
 import { Link, useFocusEffect, useRouter } from 'expo-router';
 import {
   listReceivedFiles,
-  requestPublicLocalDropFolder,
-  hasPublicLocalDropFolder,
-  initLocalDropStorage,
+  setupPublicSaveFolder,
+  hasSaveDirectory,
+  getSaveDirectoryLabel,
   type ReceivedFileRecord,
 } from '../src/lib/saveReceivedFile';
 
@@ -28,32 +28,43 @@ function formatBytes(n: number) {
 export default function HomeScreen() {
   const [mode, setMode] = useState<Mode>('online');
   const [recent, setRecent] = useState<ReceivedFileRecord[]>([]);
-  const [hasPublic, setHasPublic] = useState(false);
+  const [hasFolder, setHasFolder] = useState(false);
+  const [folderLabel, setFolderLabel] = useState('LocalDrop');
   const router = useRouter();
 
-  const refreshReceived = useCallback(async () => {
-    await initLocalDropStorage();
+  const refresh = useCallback(async () => {
+    setHasFolder(await hasSaveDirectory());
+    setFolderLabel(await getSaveDirectoryLabel());
     const list = await listReceivedFiles();
     setRecent(list.slice(0, 5));
-    setHasPublic(await hasPublicLocalDropFolder());
   }, []);
 
   useFocusEffect(
     useCallback(() => {
-      void refreshReceived();
-    }, [refreshReceived])
+      void refresh();
+    }, [refresh])
   );
 
   async function chooseFolder() {
-    // Only from home — never during an active transfer (avoids disconnect)
-    const ok = await requestPublicLocalDropFolder();
-    if (ok) {
-      Alert.alert(
-        'Folder set',
-        'New received files will also be saved to the folder you selected.'
-      );
-      setHasPublic(true);
-    }
+    Alert.alert(
+      'Save folder',
+      'Pick a location such as Downloads. LocalDrop will create a LocalDrop folder there when possible. Files will appear in the system Files app.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Choose',
+          onPress: async () => {
+            const ok = await setupPublicSaveFolder();
+            if (ok) {
+              Alert.alert('Ready', 'Received files will be saved to your LocalDrop folder.');
+              await refresh();
+            } else {
+              Alert.alert('Not set', 'Folder permission was not granted.');
+            }
+          },
+        },
+      ]
+    );
   }
 
   return (
@@ -62,6 +73,23 @@ export default function HomeScreen() {
       <Text style={styles.subtitle}>
         Fast peer-to-peer file transfer on the same network
       </Text>
+
+      {/* Folder setup banner */}
+      <View style={[styles.folderBanner, !hasFolder && styles.folderBannerWarn]}>
+        <Text style={styles.folderBannerTitle}>
+          {hasFolder ? `Saving to: ${folderLabel}` : 'Save folder not set'}
+        </Text>
+        <Text style={styles.folderBannerBody}>
+          {hasFolder
+            ? 'Files appear in the system Files app. No duplicate copies.'
+            : 'Choose a folder before receiving (e.g. Downloads). We create LocalDrop when possible.'}
+        </Text>
+        <Pressable style={styles.folderBtn} onPress={chooseFolder}>
+          <Text style={styles.folderBtnText}>
+            {hasFolder ? 'Change folder' : 'Choose save folder'}
+          </Text>
+        </Pressable>
+      </View>
 
       <View style={styles.modeContainer}>
         <Text style={styles.modeLabel}>Connection Mode</Text>
@@ -100,7 +128,22 @@ export default function HomeScreen() {
         </Link>
 
         <Link href={{ pathname: '/receive', params: { mode } }} asChild>
-          <Pressable style={styles.secondaryButton}>
+          <Pressable
+            style={styles.secondaryButton}
+            onPress={(e) => {
+              if (!hasFolder && Platform.OS === 'android') {
+                e.preventDefault?.();
+                Alert.alert(
+                  'Set save folder first',
+                  'Choose where received files should be stored (visible in Files).',
+                  [
+                    { text: 'Cancel', style: 'cancel' },
+                    { text: 'Choose folder', onPress: () => void chooseFolder() },
+                  ]
+                );
+              }
+            }}
+          >
             <Text style={styles.secondaryButtonText}>
               {mode === 'offline' ? 'Join offline session' : 'Receive Files'}
             </Text>
@@ -108,7 +151,6 @@ export default function HomeScreen() {
         </Link>
       </View>
 
-      {/* Files Received */}
       <View style={styles.receivedSection}>
         <View style={styles.receivedHeader}>
           <Text style={styles.receivedTitle}>Files Received</Text>
@@ -131,21 +173,11 @@ export default function HomeScreen() {
                   {f.name}
                 </Text>
                 <Text style={styles.receivedMeta}>
-                  {formatBytes(f.size)} · LocalDrop
+                  {formatBytes(f.size)} · {f.displayPath}
                 </Text>
               </View>
             </Pressable>
           ))
-        )}
-
-        {Platform.OS === 'android' && (
-          <Pressable style={styles.folderBtn} onPress={chooseFolder}>
-            <Text style={styles.folderBtnText}>
-              {hasPublic
-                ? 'Change public LocalDrop folder'
-                : 'Choose public LocalDrop folder'}
-            </Text>
-          </Pressable>
         )}
       </View>
     </ScrollView>
@@ -154,10 +186,7 @@ export default function HomeScreen() {
 
 const styles = StyleSheet.create({
   scroll: { flex: 1, backgroundColor: '#0f0f0f' },
-  container: {
-    padding: 24,
-    paddingBottom: 48,
-  },
+  container: { padding: 24, paddingBottom: 48 },
   title: {
     fontSize: 36,
     fontWeight: '700',
@@ -170,11 +199,30 @@ const styles = StyleSheet.create({
     fontSize: 16,
     color: '#a0a0a0',
     textAlign: 'center',
-    marginBottom: 32,
+    marginBottom: 20,
   },
-  modeContainer: {
-    marginBottom: 28,
+  folderBanner: {
+    backgroundColor: '#1a2332',
+    borderRadius: 14,
+    padding: 16,
+    marginBottom: 24,
+    borderWidth: 1,
+    borderColor: '#334155',
   },
+  folderBannerWarn: {
+    backgroundColor: '#2a2010',
+    borderColor: '#854d0e',
+  },
+  folderBannerTitle: { color: '#fff', fontWeight: '700', marginBottom: 6 },
+  folderBannerBody: { color: '#94a3b8', fontSize: 13, marginBottom: 12, lineHeight: 18 },
+  folderBtn: {
+    backgroundColor: '#3b82f6',
+    borderRadius: 10,
+    paddingVertical: 10,
+    alignItems: 'center',
+  },
+  folderBtnText: { color: '#fff', fontWeight: '600', fontSize: 14 },
+  modeContainer: { marginBottom: 28 },
   modeLabel: {
     color: '#fff',
     fontSize: 14,
@@ -194,37 +242,23 @@ const styles = StyleSheet.create({
     borderRadius: 10,
     alignItems: 'center',
   },
-  modeActive: {
-    backgroundColor: '#3b82f6',
-  },
-  modeText: {
-    color: '#a0a0a0',
-    fontWeight: '600',
-  },
-  modeTextActive: {
-    color: '#fff',
-  },
+  modeActive: { backgroundColor: '#3b82f6' },
+  modeText: { color: '#a0a0a0', fontWeight: '600' },
+  modeTextActive: { color: '#fff' },
   modeHint: {
     color: '#666',
     fontSize: 12,
     textAlign: 'center',
     marginTop: 10,
   },
-  actions: {
-    gap: 12,
-    marginBottom: 32,
-  },
+  actions: { gap: 12, marginBottom: 32 },
   primaryButton: {
     backgroundColor: '#3b82f6',
     paddingVertical: 16,
     borderRadius: 14,
     alignItems: 'center',
   },
-  primaryButtonText: {
-    color: '#fff',
-    fontSize: 17,
-    fontWeight: '600',
-  },
+  primaryButtonText: { color: '#fff', fontSize: 17, fontWeight: '600' },
   secondaryButton: {
     backgroundColor: '#1a1a1a',
     paddingVertical: 16,
@@ -233,11 +267,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#333',
   },
-  secondaryButtonText: {
-    color: '#fff',
-    fontSize: 17,
-    fontWeight: '600',
-  },
+  secondaryButtonText: { color: '#fff', fontSize: 17, fontWeight: '600' },
   receivedSection: {
     backgroundColor: '#141414',
     borderRadius: 16,
@@ -251,16 +281,8 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginBottom: 12,
   },
-  receivedTitle: {
-    color: '#fff',
-    fontSize: 16,
-    fontWeight: '700',
-  },
-  seeAll: {
-    color: '#3b82f6',
-    fontSize: 13,
-    fontWeight: '600',
-  },
+  receivedTitle: { color: '#fff', fontSize: 16, fontWeight: '700' },
+  seeAll: { color: '#3b82f6', fontSize: 13, fontWeight: '600' },
   receivedEmpty: {
     color: '#666',
     fontSize: 13,
@@ -274,13 +296,4 @@ const styles = StyleSheet.create({
   },
   receivedName: { color: '#fff', fontSize: 14 },
   receivedMeta: { color: '#888', fontSize: 12, marginTop: 2 },
-  folderBtn: {
-    marginTop: 12,
-    borderWidth: 1,
-    borderColor: '#333',
-    borderRadius: 10,
-    paddingVertical: 10,
-    alignItems: 'center',
-  },
-  folderBtnText: { color: '#3b82f6', fontSize: 12 },
 });

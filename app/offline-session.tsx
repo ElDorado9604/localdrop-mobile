@@ -1,6 +1,6 @@
 /**
  * Persistent offline session: send / receive / send more / swap direction.
- * Channel stays open until user ends the session.
+ * Saves received files to the public LocalDrop folder (same as online).
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
@@ -15,7 +15,6 @@ import {
 import { useRouter } from 'expo-router';
 import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system/legacy';
-import * as Sharing from 'expo-sharing';
 import {
   getOfflineSession,
   getOfflinePeerName,
@@ -29,6 +28,11 @@ import {
   formatSpeed,
   randomId,
 } from '../src/lib/transferProtocol';
+import {
+  saveReceivedFile,
+  hasSaveDirectory,
+  setupPublicSaveFolder,
+} from '../src/lib/saveReceivedFile';
 
 type QueuedFile = {
   id: string;
@@ -40,6 +44,7 @@ type QueuedFile = {
   progress: number;
   error?: string;
   localPath?: string;
+  displayPath?: string;
 };
 
 export default function OfflineSessionScreen() {
@@ -243,9 +248,10 @@ export default function OfflineSessionScreen() {
         const buf = incomingRef.current.get(msg.fileId);
         if (!buf) return;
         try {
-          const dir = (FileSystem.cacheDirectory || '') + 'localdrop/';
-          await FileSystem.makeDirectoryAsync(dir, { intermediates: true }).catch(() => {});
-          const path = dir + buf.meta.name.replace(/[^a-zA-Z0-9._-]/g, '_');
+          if (!(await hasSaveDirectory())) {
+            const ok = await setupPublicSaveFolder();
+            if (!ok) throw new Error('Save folder not set');
+          }
 
           const full = buf.chunks.reduce((acc, c) => {
             const u = new Uint8Array(acc.byteLength + c.byteLength);
@@ -260,10 +266,20 @@ export default function OfflineSessionScreen() {
           for (let i = 0; i < bytes.length; i += step) {
             bin += String.fromCharCode(...bytes.subarray(i, i + step));
           }
-          await FileSystem.writeAsStringAsync(path, btoa(bin), {
-            encoding: FileSystem.EncodingType.Base64,
+          const b64 = btoa(bin);
+
+          const saved = await saveReceivedFile(
+            buf.meta.name,
+            b64,
+            buf.meta.type,
+            buf.meta.size
+          );
+          updateFile(msg.fileId, {
+            status: 'completed',
+            progress: 100,
+            localPath: saved.path,
+            displayPath: saved.displayPath,
           });
-          updateFile(msg.fileId, { status: 'completed', progress: 100, localPath: path });
           incomingRef.current.delete(msg.fileId);
         } catch (e) {
           updateFile(msg.fileId, {
@@ -393,14 +409,6 @@ export default function OfflineSessionScreen() {
     router.replace('/');
   }
 
-  async function shareFile(path: string) {
-    if (await Sharing.isAvailableAsync()) {
-      await Sharing.shareAsync(path);
-    } else {
-      Alert.alert('Saved', path);
-    }
-  }
-
   const progress =
     bytesTotal > 0 ? Math.min(100, Math.round((bytesDone / bytesTotal) * 100)) : 0;
 
@@ -459,6 +467,12 @@ export default function OfflineSessionScreen() {
           <Pressable style={styles.primaryBtn} onPress={resetForMore}>
             <Text style={styles.primaryBtnText}>Send more files</Text>
           </Pressable>
+          <Pressable
+            style={[styles.primaryBtn, { marginTop: 12, backgroundColor: '#1a1a1a', borderWidth: 1, borderColor: '#3b82f6' }]}
+            onPress={() => router.push('/received')}
+          >
+            <Text style={[styles.primaryBtnText, { color: '#3b82f6' }]}>View Files Received</Text>
+          </Pressable>
           <Text style={styles.hint}>Or wait for the other side to send</Text>
         </View>
       )}
@@ -470,13 +484,13 @@ export default function OfflineSessionScreen() {
               <View style={{ flex: 1 }}>
                 <Text style={styles.fileName} numberOfLines={1}>{f.name}</Text>
                 <Text style={styles.fileMeta}>
-                  {f.status} · {f.progress}% · {formatBytes(f.size)}
+                  {f.status === 'completed'
+                    ? `Saved · ${f.displayPath || f.name}`
+                    : `${f.status} · ${f.progress}% · ${formatBytes(f.size)}`}
                 </Text>
               </View>
-              {f.status === 'completed' && f.localPath && (
-                <Pressable onPress={() => shareFile(f.localPath!)}>
-                  <Text style={styles.share}>Share</Text>
-                </Pressable>
+              {f.status === 'completed' && (
+                <Text style={styles.savedBadge}>Saved</Text>
               )}
             </View>
           ))}
@@ -558,7 +572,7 @@ const styles = StyleSheet.create({
   },
   fileName: { color: '#fff' },
   fileMeta: { color: '#888', fontSize: 12, marginTop: 2 },
-  share: { color: '#3b82f6', fontWeight: '600' },
+  savedBadge: { color: '#22c55e', fontWeight: '700', fontSize: 12 },
   done: { color: '#22c55e', fontSize: 18, fontWeight: '700', marginBottom: 16 },
   error: { color: '#ef4444', textAlign: 'center', marginTop: 12 },
   endBtn: {

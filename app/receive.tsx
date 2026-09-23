@@ -24,12 +24,13 @@ export default function ReceiveScreen() {
   const statusRef = useRef(status);
   statusRef.current = status;
   const activeRoomRef = useRef(false);
+  const navigatedRef = useRef(false);
 
   useEffect(() => {
     const s = getSocket();
 
     const onPeerLeft = () => {
-      if (statusRef.current === 'connected') {
+      if (statusRef.current === 'connected' && !navigatedRef.current) {
         activeRoomRef.current = false;
         setStatus('idle');
         setPeerName(null);
@@ -38,6 +39,7 @@ export default function ReceiveScreen() {
     };
 
     const onCancelled = () => {
+      if (navigatedRef.current) return;
       activeRoomRef.current = false;
       setStatus('idle');
       setPeerName(null);
@@ -50,17 +52,33 @@ export default function ReceiveScreen() {
     return () => {
       s.off('room:peer-left', onPeerLeft);
       s.off('room:cancelled', onCancelled);
-      if (activeRoomRef.current) {
+      // Only cancel if we never handed off to the transfer screen
+      if (activeRoomRef.current && !navigatedRef.current) {
         cancelRoom();
         activeRoomRef.current = false;
       }
     };
   }, []);
 
+  function goToTransfer(name: string) {
+    if (navigatedRef.current) return;
+    navigatedRef.current = true;
+    activeRoomRef.current = false; // transfer screen owns the session
+    router.replace({
+      pathname: '/transfer',
+      params: {
+        role: 'receiver',
+        peerName: name || 'sender',
+        mode: mode || 'online',
+      },
+    });
+  }
+
   async function handleJoin() {
-    const trimmed = code.trim().toUpperCase();
-    if (trimmed.length < 4) {
-      Alert.alert('Invalid code', 'Please enter the pairing code');
+    // Backend expects 6-digit numeric code
+    const trimmed = code.replace(/\D/g, '').slice(0, 6);
+    if (trimmed.length !== 6) {
+      Alert.alert('Invalid code', 'Enter the 6-digit pairing code from the sender');
       return;
     }
 
@@ -86,27 +104,21 @@ export default function ReceiveScreen() {
     activeRoomRef.current = true;
     setPeerName(res.peerName);
     setStatus('connected');
+
+    // CRITICAL: web sender creates WebRTC offer ~400ms after peer-joined.
+    // We must be on the transfer screen (listening for signal:offer) before that.
+    // Auto-open immediately — do not wait for a "Continue" tap.
+    setTimeout(() => goToTransfer(res.peerName || 'sender'), 50);
   }
 
   function cancel() {
+    if (navigatedRef.current) return;
     cancelRoom();
     activeRoomRef.current = false;
     setStatus('idle');
     setPeerName(null);
     setCode('');
     setError(null);
-  }
-
-  function goToTransfer() {
-    activeRoomRef.current = false; // transfer screen owns the session
-    router.push({
-      pathname: '/transfer',
-      params: {
-        role: 'receiver',
-        peerName: peerName || 'sender',
-        mode: mode || 'online',
-      },
-    });
   }
 
   return (
@@ -118,17 +130,17 @@ export default function ReceiveScreen() {
       {status === 'idle' && (
         <>
           <Text style={styles.title}>Enter Pairing Code</Text>
-          <Text style={styles.hint}>Ask the sender for the pairing code</Text>
+          <Text style={styles.hint}>Ask the sender for the 6-digit code</Text>
 
           <TextInput
             style={styles.input}
             value={code}
-            onChangeText={setCode}
-            placeholder="ABC123"
+            onChangeText={(t) => setCode(t.replace(/\D/g, '').slice(0, 6))}
+            placeholder="123456"
             placeholderTextColor="#555"
-            autoCapitalize="characters"
+            keyboardType="number-pad"
             autoCorrect={false}
-            maxLength={8}
+            maxLength={6}
           />
 
           <Pressable style={styles.primaryBtn} onPress={handleJoin}>
@@ -146,11 +158,15 @@ export default function ReceiveScreen() {
 
       {status === 'connected' && (
         <View style={styles.center}>
+          <ActivityIndicator color="#3b82f6" size="large" />
           <Text style={styles.connectedTitle}>Connected!</Text>
           <Text style={styles.peerText}>Sender: {peerName || 'Unknown'}</Text>
-          <Text style={styles.hint}>Ready to receive files</Text>
+          <Text style={styles.hint}>Opening transfer…</Text>
 
-          <Pressable style={[styles.primaryBtn, { marginTop: 24, width: '100%' }]} onPress={goToTransfer}>
+          <Pressable
+            style={[styles.primaryBtn, { marginTop: 24, width: '100%' }]}
+            onPress={() => goToTransfer(peerName || 'sender')}
+          >
             <Text style={styles.primaryBtnText}>Continue</Text>
           </Pressable>
 
@@ -195,7 +211,7 @@ const styles = StyleSheet.create({
   primaryBtnText: { color: '#fff', fontSize: 16, fontWeight: '600' },
   center: { alignItems: 'center' },
   statusText: { color: '#aaa', marginTop: 16 },
-  connectedTitle: { color: '#22c55e', fontSize: 24, fontWeight: '700' },
+  connectedTitle: { color: '#22c55e', fontSize: 24, fontWeight: '700', marginTop: 16 },
   peerText: { color: '#fff', marginTop: 12, fontSize: 16 },
   cancelBtn: { marginTop: 24 },
   cancelText: { color: '#ef4444' },

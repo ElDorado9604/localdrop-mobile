@@ -9,7 +9,8 @@ import {
   ActivityIndicator,
 } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import * as FileSystem from 'expo-file-system';
+// SDK 54+: old API moved to legacy — required for readAsStringAsync / writeAsStringAsync
+import * as FileSystem from 'expo-file-system/legacy';
 import * as Sharing from 'expo-sharing';
 import { getSocket, sendSignal, emitTransferStarted, emitRoomComplete } from '../src/lib/socket';
 import { WebRTCSession } from '../src/lib/webrtcSession';
@@ -68,12 +69,10 @@ export default function TransferScreen() {
     Map<string, { meta: FileMeta; chunks: ArrayBuffer[]; received: number; totalChunks: number }>
   >(new Map());
 
-  // Keep queueRef in sync
   useEffect(() => {
     queueRef.current = queue;
   }, [queue]);
 
-  // Init files for sender
   useEffect(() => {
     if (role === 'sender' && params.filesJson) {
       try {
@@ -85,7 +84,7 @@ export default function TransferScreen() {
         }));
         setQueue(normalized);
         queueRef.current = normalized;
-      } catch (e) {
+      } catch {
         setError('Could not load file list');
       }
     }
@@ -340,7 +339,6 @@ export default function TransferScreen() {
     [updateFile, runSend]
   );
 
-  // Setup WebRTC + signaling
   useEffect(() => {
     let available = false;
     try {
@@ -368,7 +366,6 @@ export default function TransferScreen() {
       onOpen: () => {
         setPhase('ready');
         setError(null);
-        // Auto-send transfer offer shortly after channel opens (sender only)
         if (role === 'sender') {
           setTimeout(() => sendTransferOffer(), 400);
         }

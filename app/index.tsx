@@ -14,7 +14,6 @@ export default function HomeScreen() {
         Fast peer-to-peer file transfer on the same network
       </Text>
 
-      {/* Mode Switcher */}
       <View style={styles.modeContainer}>
         <Text style={styles.modeLabel}>Connection Mode</Text>
         <View style={styles.modeButtons}>
@@ -37,21 +36,25 @@ export default function HomeScreen() {
         </View>
         <Text style={styles.modeHint}>
           {mode === 'online'
-            ? 'Uses signaling server for easy QR / code pairing'
-            : 'Fully local discovery – no internet required'}
+            ? 'Uses signaling server for code / QR pairing'
+            : 'No internet — share offer/answer on same Wi‑Fi, then send both ways'}
         </Text>
       </View>
 
       <View style={styles.actions}>
         <Link href={{ pathname: '/send', params: { mode } }} asChild>
           <Pressable style={styles.primaryButton}>
-            <Text style={styles.primaryButtonText}>Send Files</Text>
+            <Text style={styles.primaryButtonText}>
+              {mode === 'offline' ? 'Host offline session' : 'Send Files'}
+            </Text>
           </Pressable>
         </Link>
 
         <Link href={{ pathname: '/receive', params: { mode } }} asChild>
           <Pressable style={styles.secondaryButton}>
-            <Text style={styles.secondaryButtonText}>Receive Files</Text>
+            <Text style={styles.secondaryButtonText}>
+              {mode === 'offline' ? 'Join offline session' : 'Receive Files'}
+            </Text>
           </Pressable>
         </Link>
       </View>

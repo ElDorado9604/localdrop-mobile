@@ -1,6 +1,6 @@
 /**
  * Manages a single WebRTC peer connection + data channel for LocalDrop.
- * Signaling is done externally (Socket.IO for online, or manual for offline).
+ * Signaling is done externally (Socket.IO for online, or QR for offline).
  */
 
 import {
@@ -10,6 +10,7 @@ import {
   RTCIceCandidate,
   isWebRTCAvailable,
 } from './webrtc';
+import { waitForIceComplete } from './offlineSignal';
 
 type SignalHandler = (type: 'offer' | 'answer' | 'ice-candidate', payload: any) => void;
 
@@ -25,7 +26,7 @@ export class WebRTCSession {
   private onClose: (() => void) | null = null;
   private onFailed: ((reason: string) => void) | null = null;
 
-  constructor(onSignal: SignalHandler) {
+  constructor(onSignal: SignalHandler = () => {}) {
     this.onSignal = onSignal;
   }
 
@@ -39,6 +40,8 @@ export class WebRTCSession {
     this.onMessage = h.onMessage ?? null;
     this.onClose = h.onClose ?? null;
     this.onFailed = h.onFailed ?? null;
+    // Re-bind if channel already open
+    if (this.channel) this.wireChannel(this.channel);
   }
 
   isAvailable() {
@@ -92,6 +95,16 @@ export class WebRTCSession {
     const offer = await pc.createOffer({});
     await pc.setLocalDescription(offer);
     this.onSignal('offer', offer);
+    return offer;
+  }
+
+  /** Offline: create offer and wait for ICE so full SDP fits in one QR. */
+  async createOfferForQr(): Promise<any> {
+    const pc = this.ensurePc(true);
+    const offer = await pc.createOffer({});
+    await pc.setLocalDescription(offer);
+    await waitForIceComplete(pc);
+    return pc.localDescription;
   }
 
   async handleOffer(sdp: any) {
@@ -102,6 +115,19 @@ export class WebRTCSession {
     const answer = await pc.createAnswer();
     await pc.setLocalDescription(answer);
     this.onSignal('answer', answer);
+    return answer;
+  }
+
+  /** Offline: handle offer, wait for ICE, return answer SDP for QR. */
+  async handleOfferForQr(sdp: any): Promise<any> {
+    const pc = this.ensurePc(false);
+    await pc.setRemoteDescription(new RTCSessionDescription(sdp));
+    this.remoteSet = true;
+    await this.flushIce();
+    const answer = await pc.createAnswer();
+    await pc.setLocalDescription(answer);
+    await waitForIceComplete(pc);
+    return pc.localDescription;
   }
 
   async handleAnswer(sdp: any) {
@@ -156,7 +182,6 @@ export class WebRTCSession {
   async sendBinary(data: ArrayBuffer) {
     const ch = this.channel;
     if (!ch || ch.readyState !== 'open') throw new Error('Channel closed');
-    // simple backpressure
     while ((ch.bufferedAmount ?? 0) > 256 * 1024) {
       await new Promise((r) => setTimeout(r, 30));
     }
@@ -165,6 +190,11 @@ export class WebRTCSession {
 
   markCompleted() {
     this.completed = true;
+  }
+
+  /** Offline: allow more transfers — clear completed flag but keep channel. */
+  prepareForMore() {
+    this.completed = false;
   }
 
   close() {

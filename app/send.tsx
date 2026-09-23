@@ -39,6 +39,8 @@ export default function SendScreen() {
   const activeRoomRef = useRef(false);
 
   useEffect(() => {
+    if (isOffline) return;
+
     const s = getSocket();
 
     const onPeerJoined = (data: { peerName: string }) => {
@@ -75,7 +77,7 @@ export default function SendScreen() {
         activeRoomRef.current = false;
       }
     };
-  }, []);
+  }, [isOffline]);
 
   async function pickFiles() {
     try {
@@ -102,23 +104,14 @@ export default function SendScreen() {
   }
 
   async function startSending() {
-    if (files.length === 0) {
-      Alert.alert('No files', 'Please select at least one file');
+    if (isOffline) {
+      // Offline: pair first (files chosen in the persistent session)
+      router.push('/offline-host');
       return;
     }
 
-    if (isOffline) {
-      Alert.alert(
-        'Offline mode',
-        'Full offline discovery is in progress. For now, use Online mode on the same Wi-Fi — file data still goes peer-to-peer (not through the server).',
-        [
-          { text: 'OK' },
-          {
-            text: 'Use Online instead',
-            onPress: () => router.setParams({ mode: 'online' }),
-          },
-        ]
-      );
+    if (files.length === 0) {
+      Alert.alert('No files', 'Please select at least one file');
       return;
     }
 
@@ -175,21 +168,35 @@ export default function SendScreen() {
     return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
   }
 
-  // Same join URL as the web app QR — camera opens web receive with code filled in
   const joinUrl = pairingCode ? buildJoinUrl(pairingCode) : null;
   const qrImageUrl = joinUrl
     ? `https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(joinUrl)}`
     : null;
 
+  if (isOffline) {
+    return (
+      <View style={styles.container}>
+        <View style={styles.content}>
+          <Text style={styles.modeLabel}>Mode: Offline (no internet)</Text>
+          <Text style={styles.wifiHint}>
+            Both phones on the same Wi‑Fi or hotspot. You will share a one-time link code (Share
+            sheet), then transfer as many times as you want.
+          </Text>
+          <Pressable style={styles.primaryBtn} onPress={() => router.push('/offline-host')}>
+            <Text style={styles.primaryBtnText}>Start as Host</Text>
+          </Pressable>
+          <Text style={styles.offlineNote}>
+            Host creates the link. The other phone uses Receive → Join offline.
+          </Text>
+        </View>
+      </View>
+    );
+  }
+
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.content}>
-      <Text style={styles.modeLabel}>
-        Mode: {isOffline ? 'Offline (Local Discovery)' : 'Online (Signaling Server)'}
-      </Text>
-
-      <Text style={styles.wifiHint}>
-        Both devices must be on the same Wi‑Fi (not mobile data).
-      </Text>
+      <Text style={styles.modeLabel}>Mode: Online (Signaling Server)</Text>
+      <Text style={styles.wifiHint}>Both devices must be on the same Wi‑Fi (not mobile data).</Text>
 
       <View style={styles.section}>
         <Text style={styles.sectionTitle}>Files to send</Text>
@@ -223,9 +230,7 @@ export default function SendScreen() {
           onPress={startSending}
           disabled={files.length === 0}
         >
-          <Text style={styles.primaryBtnText}>
-            {isOffline ? 'Start Offline Session' : 'Create Pairing Code'}
-          </Text>
+          <Text style={styles.primaryBtnText}>Create Pairing Code</Text>
         </Pressable>
       )}
 
@@ -286,6 +291,7 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     marginBottom: 20,
   },
+  offlineNote: { color: '#888', textAlign: 'center', marginTop: 16, fontSize: 13 },
   section: { marginBottom: 24 },
   sectionTitle: { color: '#fff', fontSize: 16, fontWeight: '600', marginBottom: 12 },
   empty: { color: '#666', marginBottom: 12 },

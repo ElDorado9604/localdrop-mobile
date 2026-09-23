@@ -27,6 +27,8 @@ export default function ReceiveScreen() {
   const navigatedRef = useRef(false);
 
   useEffect(() => {
+    if (isOffline) return;
+
     const s = getSocket();
 
     const onPeerLeft = () => {
@@ -52,18 +54,17 @@ export default function ReceiveScreen() {
     return () => {
       s.off('room:peer-left', onPeerLeft);
       s.off('room:cancelled', onCancelled);
-      // Only cancel if we never handed off to the transfer screen
       if (activeRoomRef.current && !navigatedRef.current) {
         cancelRoom();
         activeRoomRef.current = false;
       }
     };
-  }, []);
+  }, [isOffline]);
 
   function goToTransfer(name: string) {
     if (navigatedRef.current) return;
     navigatedRef.current = true;
-    activeRoomRef.current = false; // transfer screen owns the session
+    activeRoomRef.current = false;
     router.replace({
       pathname: '/transfer',
       params: {
@@ -75,18 +76,9 @@ export default function ReceiveScreen() {
   }
 
   async function handleJoin() {
-    // Backend expects 6-digit numeric code
     const trimmed = code.replace(/\D/g, '').slice(0, 6);
     if (trimmed.length !== 6) {
       Alert.alert('Invalid code', 'Enter the 6-digit pairing code from the sender');
-      return;
-    }
-
-    if (isOffline) {
-      Alert.alert(
-        'Offline mode',
-        'Full offline discovery is in progress. Use Online mode on the same Wi-Fi — file bytes still go peer-to-peer.'
-      );
       return;
     }
 
@@ -104,10 +96,6 @@ export default function ReceiveScreen() {
     activeRoomRef.current = true;
     setPeerName(res.peerName);
     setStatus('connected');
-
-    // CRITICAL: web sender creates WebRTC offer ~400ms after peer-joined.
-    // We must be on the transfer screen (listening for signal:offer) before that.
-    // Auto-open immediately — do not wait for a "Continue" tap.
     setTimeout(() => goToTransfer(res.peerName || 'sender'), 50);
   }
 
@@ -121,11 +109,23 @@ export default function ReceiveScreen() {
     setError(null);
   }
 
+  if (isOffline) {
+    return (
+      <View style={styles.container}>
+        <Text style={styles.modeLabel}>Mode: Offline (no internet)</Text>
+        <Text style={styles.hint}>
+          Join a host on the same Wi‑Fi or hotspot. You will paste their offer and share your answer.
+        </Text>
+        <Pressable style={styles.primaryBtn} onPress={() => router.push('/offline-join')}>
+          <Text style={styles.primaryBtnText}>Join offline host</Text>
+        </Pressable>
+      </View>
+    );
+  }
+
   return (
     <View style={styles.container}>
-      <Text style={styles.modeLabel}>
-        Mode: {isOffline ? 'Offline (Local Discovery)' : 'Online (Signaling Server)'}
-      </Text>
+      <Text style={styles.modeLabel}>Mode: Online (Signaling Server)</Text>
 
       {status === 'idle' && (
         <>

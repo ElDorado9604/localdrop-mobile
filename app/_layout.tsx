@@ -1,8 +1,14 @@
+import { useEffect } from 'react';
 import { Stack } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
+import { initLocalDropStorage } from '../src/lib/saveReceivedFile';
 
 export default function RootLayout() {
+  useEffect(() => {
+    void initLocalDropStorage();
+  }, []);
+
   return (
     <SafeAreaProvider>
       <StatusBar style="light" />
@@ -18,6 +24,10 @@ export default function RootLayout() {
         <Stack.Screen name="send" options={{ title: 'Send Files' }} />
         <Stack.Screen name="receive" options={{ title: 'Receive Files' }} />
         <Stack.Screen name="transfer" options={{ title: 'Transfer' }} />
+        <Stack.Screen name="offline-host" options={{ title: 'Offline Host' }} />
+        <Stack.Screen name="offline-join" options={{ title: 'Offline Join' }} />
+        <Stack.Screen name="offline-session" options={{ title: 'Offline Session' }} />
+        <Stack.Screen name="received" options={{ title: 'Files Received' }} />
       </Stack>
     </SafeAreaProvider>
   );

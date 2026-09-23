@@ -1,14 +1,63 @@
-import { View, Text, StyleSheet, Pressable } from 'react-native';
-import { Link } from 'expo-router';
-import { useState } from 'react';
+import { useCallback, useState } from 'react';
+import {
+  View,
+  Text,
+  StyleSheet,
+  Pressable,
+  ScrollView,
+  Platform,
+  Alert,
+} from 'react-native';
+import { Link, useFocusEffect, useRouter } from 'expo-router';
+import {
+  listReceivedFiles,
+  requestPublicLocalDropFolder,
+  hasPublicLocalDropFolder,
+  initLocalDropStorage,
+  type ReceivedFileRecord,
+} from '../src/lib/saveReceivedFile';
 
 type Mode = 'online' | 'offline';
 
+function formatBytes(n: number) {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
 export default function HomeScreen() {
   const [mode, setMode] = useState<Mode>('online');
+  const [recent, setRecent] = useState<ReceivedFileRecord[]>([]);
+  const [hasPublic, setHasPublic] = useState(false);
+  const router = useRouter();
+
+  const refreshReceived = useCallback(async () => {
+    await initLocalDropStorage();
+    const list = await listReceivedFiles();
+    setRecent(list.slice(0, 5));
+    setHasPublic(await hasPublicLocalDropFolder());
+  }, []);
+
+  useFocusEffect(
+    useCallback(() => {
+      void refreshReceived();
+    }, [refreshReceived])
+  );
+
+  async function chooseFolder() {
+    // Only from home — never during an active transfer (avoids disconnect)
+    const ok = await requestPublicLocalDropFolder();
+    if (ok) {
+      Alert.alert(
+        'Folder set',
+        'New received files will also be saved to the folder you selected.'
+      );
+      setHasPublic(true);
+    }
+  }
 
   return (
-    <View style={styles.container}>
+    <ScrollView style={styles.scroll} contentContainerStyle={styles.container}>
       <Text style={styles.title}>LocalDrop</Text>
       <Text style={styles.subtitle}>
         Fast peer-to-peer file transfer on the same network
@@ -58,16 +107,56 @@ export default function HomeScreen() {
           </Pressable>
         </Link>
       </View>
-    </View>
+
+      {/* Files Received */}
+      <View style={styles.receivedSection}>
+        <View style={styles.receivedHeader}>
+          <Text style={styles.receivedTitle}>Files Received</Text>
+          <Pressable onPress={() => router.push('/received')}>
+            <Text style={styles.seeAll}>See all</Text>
+          </Pressable>
+        </View>
+
+        {recent.length === 0 ? (
+          <Text style={styles.receivedEmpty}>No files received yet</Text>
+        ) : (
+          recent.map((f) => (
+            <Pressable
+              key={f.id}
+              style={styles.receivedRow}
+              onPress={() => router.push('/received')}
+            >
+              <View style={{ flex: 1 }}>
+                <Text style={styles.receivedName} numberOfLines={1}>
+                  {f.name}
+                </Text>
+                <Text style={styles.receivedMeta}>
+                  {formatBytes(f.size)} · LocalDrop
+                </Text>
+              </View>
+            </Pressable>
+          ))
+        )}
+
+        {Platform.OS === 'android' && (
+          <Pressable style={styles.folderBtn} onPress={chooseFolder}>
+            <Text style={styles.folderBtnText}>
+              {hasPublic
+                ? 'Change public LocalDrop folder'
+                : 'Choose public LocalDrop folder'}
+            </Text>
+          </Pressable>
+        )}
+      </View>
+    </ScrollView>
   );
 }
 
 const styles = StyleSheet.create({
+  scroll: { flex: 1, backgroundColor: '#0f0f0f' },
   container: {
-    flex: 1,
-    backgroundColor: '#0f0f0f',
     padding: 24,
-    justifyContent: 'center',
+    paddingBottom: 48,
   },
   title: {
     fontSize: 36,
@@ -75,15 +164,16 @@ const styles = StyleSheet.create({
     color: '#fff',
     textAlign: 'center',
     marginBottom: 8,
+    marginTop: 12,
   },
   subtitle: {
     fontSize: 16,
     color: '#a0a0a0',
     textAlign: 'center',
-    marginBottom: 40,
+    marginBottom: 32,
   },
   modeContainer: {
-    marginBottom: 40,
+    marginBottom: 28,
   },
   modeLabel: {
     color: '#fff',
@@ -121,7 +211,8 @@ const styles = StyleSheet.create({
     marginTop: 10,
   },
   actions: {
-    gap: 16,
+    gap: 12,
+    marginBottom: 32,
   },
   primaryButton: {
     backgroundColor: '#3b82f6',
@@ -147,4 +238,49 @@ const styles = StyleSheet.create({
     fontSize: 17,
     fontWeight: '600',
   },
+  receivedSection: {
+    backgroundColor: '#141414',
+    borderRadius: 16,
+    padding: 16,
+    borderWidth: 1,
+    borderColor: '#222',
+  },
+  receivedHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  receivedTitle: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: '700',
+  },
+  seeAll: {
+    color: '#3b82f6',
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  receivedEmpty: {
+    color: '#666',
+    fontSize: 13,
+    textAlign: 'center',
+    paddingVertical: 16,
+  },
+  receivedRow: {
+    paddingVertical: 10,
+    borderTopWidth: 1,
+    borderTopColor: '#222',
+  },
+  receivedName: { color: '#fff', fontSize: 14 },
+  receivedMeta: { color: '#888', fontSize: 12, marginTop: 2 },
+  folderBtn: {
+    marginTop: 12,
+    borderWidth: 1,
+    borderColor: '#333',
+    borderRadius: 10,
+    paddingVertical: 10,
+    alignItems: 'center',
+  },
+  folderBtnText: { color: '#3b82f6', fontSize: 12 },
 });

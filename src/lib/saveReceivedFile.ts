@@ -32,6 +32,44 @@ function randomId(): string {
   return `${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 9)}`;
 }
 
+/**
+ * Turn a SAF tree URI into a readable path when possible.
+ * e.g. content://…/tree/primary%3ADownload%2FLocalDrop
+ *   → /storage/emulated/0/Download/LocalDrop
+ */
+export function humanPathFromSafUri(uri: string): string {
+  try {
+    const treeMatch = uri.match(/\/tree\/([^?]+)/);
+    if (treeMatch) {
+      let decoded = decodeURIComponent(treeMatch[1]);
+      // primary:Download/LocalDrop  or  raw:/storage/...
+      if (decoded.startsWith('primary:')) {
+        return '/storage/emulated/0/' + decoded.slice('primary:'.length);
+      }
+      if (decoded.startsWith('raw:')) {
+        return decoded.slice(4);
+      }
+      // SD card: XXXX-XXXX:Folder
+      const sd = decoded.match(/^([0-9A-Fa-f-]+):(.+)$/);
+      if (sd) {
+        return `/storage/${sd[1]}/${sd[2]}`;
+      }
+      return decoded;
+    }
+    const docMatch = uri.match(/\/document\/([^?]+)/);
+    if (docMatch) {
+      let decoded = decodeURIComponent(docMatch[1]);
+      if (decoded.startsWith('primary:')) {
+        return '/storage/emulated/0/' + decoded.slice('primary:'.length);
+      }
+      return decoded;
+    }
+  } catch {
+    /* */
+  }
+  return 'Selected folder';
+}
+
 export async function getSaveDirectoryUri(): Promise<string | null> {
   return AsyncStorage.getItem(SAVE_DIR_KEY);
 }
@@ -49,11 +87,9 @@ export async function hasSaveDirectory(): Promise<boolean> {
 /**
  * Ask user to pick (or create) a folder in the system picker.
  * We use that folder as-is — no LocalDrop subfolder is created by the app.
- * Call only when NOT in an active transfer.
  */
 export async function setupPublicSaveFolder(): Promise<boolean> {
   if (Platform.OS !== 'android') {
-    // iOS: app documents (visible in Files with UIFileSharingEnabled)
     const dir = (FileSystem.documentDirectory || '') + FOLDER_NAME + '/';
     await FileSystem.makeDirectoryAsync(dir, { intermediates: true }).catch(() => {});
     await AsyncStorage.setItem(SAVE_DIR_KEY, dir);
@@ -65,9 +101,9 @@ export async function setupPublicSaveFolder(): Promise<boolean> {
     const perms = await FileSystem.StorageAccessFramework.requestDirectoryPermissionsAsync();
     if (!perms.granted || !perms.directoryUri) return false;
 
-    // Use exactly the folder the user selected / created — do not mkdir
+    const label = humanPathFromSafUri(perms.directoryUri);
     await AsyncStorage.setItem(SAVE_DIR_KEY, perms.directoryUri);
-    await AsyncStorage.setItem(SAVE_LABEL_KEY, 'Selected folder');
+    await AsyncStorage.setItem(SAVE_LABEL_KEY, label);
     return true;
   } catch {
     return false;
@@ -78,12 +114,12 @@ export async function clearSaveDirectory() {
   await AsyncStorage.multiRemove([SAVE_DIR_KEY, SAVE_LABEL_KEY]);
 }
 
-/** @deprecated use hasSaveDirectory */
+/** @deprecated */
 export async function hasPublicLocalDropFolder(): Promise<boolean> {
   return hasSaveDirectory();
 }
 
-/** @deprecated use setupPublicSaveFolder */
+/** @deprecated */
 export async function requestPublicLocalDropFolder(): Promise<boolean> {
   return setupPublicSaveFolder();
 }
@@ -123,16 +159,33 @@ export async function removeFromReceivedIndex(id: string) {
   await writeIndex(list.filter((x) => x.id !== id));
 }
 
-/** Ensure folder is configured; show alert and return false if user must set it. */
 export async function ensureSaveFolderOrPrompt(): Promise<boolean> {
   if (await hasSaveDirectory()) return true;
   return false;
 }
 
 /**
- * Write received file ONLY to the public save folder (no internal duplicate).
- * Throws if folder not configured.
+ * Resolve a content:// or file:// path to a local file:// URL that Sharing can open.
+ * Copies content URIs into cache temporarily.
  */
+export async function resolveShareableUri(
+  path: string,
+  fileName: string
+): Promise<string> {
+  if (path.startsWith('file://')) return path;
+
+  if (path.startsWith('content://')) {
+    const cacheDir = FileSystem.cacheDirectory || FileSystem.documentDirectory || '';
+    const dest = cacheDir + 'share_' + Date.now() + '_' + safeFileName(fileName);
+    await FileSystem.copyAsync({ from: path, to: dest });
+    return dest;
+  }
+
+  // bare absolute path
+  if (path.startsWith('/')) return 'file://' + path;
+  return path;
+}
+
 export async function saveReceivedFile(
   fileName: string,
   base64: string,
@@ -185,6 +238,7 @@ export async function saveReceivedFile(
       ? sizeHint
       : Math.floor((base64.length * 3) / 4);
 
+  // Prefer human folder path + name, e.g. /storage/emulated/0/Download/LocalDrop/photo.jpg
   const displayPath = `${label}/${name}`;
 
   await addToReceivedIndex({
@@ -200,9 +254,7 @@ export async function saveReceivedFile(
   return { path: finalPath, displayPath, id };
 }
 
-export async function initLocalDropStorage(): Promise<void> {
-  // Folder is user-chosen on Android.
-}
+export async function initLocalDropStorage(): Promise<void> {}
 
 export function getAppLocalDropDir(): string {
   return (FileSystem.documentDirectory || '') + FOLDER_NAME + '/';

@@ -12,7 +12,6 @@ import {
 } from 'react-native';
 import { useFocusEffect } from 'expo-router';
 import * as Sharing from 'expo-sharing';
-import * as FileSystem from 'expo-file-system/legacy';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import {
   listReceivedFiles,
@@ -20,6 +19,7 @@ import {
   setupPublicSaveFolder,
   hasSaveDirectory,
   getSaveDirectoryLabel,
+  resolveShareableUri,
   type ReceivedFileRecord,
 } from '../src/lib/saveReceivedFile';
 
@@ -144,26 +144,25 @@ export default function ReceivedScreen() {
 
   async function openOrShare(item: ReceivedFileRecord) {
     try {
-      if (item.path.startsWith('content://') || item.path.startsWith('file://')) {
-        if (await Sharing.isAvailableAsync()) {
-          await Sharing.shareAsync(item.path);
-          return;
-        }
+      if (!(await Sharing.isAvailableAsync())) {
+        Alert.alert('Saved at', item.displayPath);
+        return;
       }
-      const info = await FileSystem.getInfoAsync(item.path);
-      if (!info.exists) {
+      // content:// is not supported by ExpoSharing — copy to cache first
+      const shareUri = await resolveShareableUri(item.path, item.name);
+      await Sharing.shareAsync(shareUri, {
+        mimeType: item.mime || undefined,
+        dialogTitle: item.name,
+      });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : 'Could not open file';
+      if (/no longer|not exist|ENOENT|missing/i.test(msg)) {
         Alert.alert('Missing', 'File is no longer on this device.');
         await removeFromReceivedIndex(item.id);
         await load();
         return;
       }
-      if (await Sharing.isAvailableAsync()) {
-        await Sharing.shareAsync(item.path);
-      } else {
-        Alert.alert('Saved', item.displayPath);
-      }
-    } catch (e) {
-      Alert.alert('Error', e instanceof Error ? e.message : 'Could not open file');
+      Alert.alert('Error', msg);
     }
   }
 
@@ -186,7 +185,7 @@ export default function ReceivedScreen() {
           <Text style={styles.meta}>
             {formatBytes(item.size)} · {formatWhen(item.receivedAt)}
           </Text>
-          <Text style={styles.path} numberOfLines={1}>
+          <Text style={styles.path} numberOfLines={2}>
             {item.displayPath}
           </Text>
         </View>
@@ -245,7 +244,9 @@ export default function ReceivedScreen() {
       </View>
 
       {files.length > 0 && (
-        <Text style={styles.count}>{files.length} file{files.length === 1 ? '' : 's'}</Text>
+        <Text style={styles.count}>
+          {files.length} file{files.length === 1 ? '' : 's'}
+        </Text>
       )}
 
       <FlatList

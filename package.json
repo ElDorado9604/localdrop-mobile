@@ -12,6 +12,7 @@
   "dependencies": {
     "@react-native-async-storage/async-storage": "2.2.0",
     "expo": "~57.0.0",
+    "expo-camera": "~17.0.0",
     "expo-constants": "~57.0.0",
     "expo-document-picker": "~57.0.0",
     "expo-file-system": "~57.0.0",
@@ -23,9 +24,11 @@
     "react-dom": "19.2.3",
     "react-native": "0.86.3",
     "react-native-gesture-handler": "~2.32.0",
+    "react-native-qrcode-svg": "^6.3.15",
     "react-native-reanimated": "4.5.1",
     "react-native-safe-area-context": "~5.7.0",
     "react-native-screens": "~4.26.0",
+    "react-native-svg": "15.12.1",
     "react-native-webrtc": "124.0.7",
     "react-native-worklets": "0.10.1",
     "socket.io-client": "^4.8.1"

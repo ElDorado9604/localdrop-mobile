@@ -1,7 +1,7 @@
 /**
- * Camera QR scanner for offline offer or answer.
+ * Camera QR scanner — Android-safe remount + onCameraReady to avoid black preview.
  */
-import { useState, useEffect } from 'react';
+import { useState, useCallback } from 'react';
 import {
   View,
   Text,
@@ -11,7 +11,7 @@ import {
   Dimensions,
   Platform,
 } from 'react-native';
-import { useLocalSearchParams, useRouter } from 'expo-router';
+import { useLocalSearchParams, useRouter, useFocusEffect } from 'expo-router';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import { decodeRoomPayload } from '../src/lib/offlineSignal';
 
@@ -23,18 +23,22 @@ export default function OfflineScanScreen() {
   const router = useRouter();
   const [permission, requestPermission] = useCameraPermissions();
   const [scanned, setScanned] = useState(false);
-  const [ready, setReady] = useState(false);
+  const [cameraReady, setCameraReady] = useState(false);
+  const [cameraKey, setCameraKey] = useState(0);
 
   const expectType = mode === 'answer' ? 'answer' : 'offer';
 
-  // Mount camera only after permission is confirmed (avoids black preview on some devices)
-  useEffect(() => {
-    if (permission?.granted) {
-      const t = setTimeout(() => setReady(true), 300);
-      return () => clearTimeout(t);
-    }
-    setReady(false);
-  }, [permission?.granted]);
+  // Remount camera every time this screen is focused (fixes Android black screen)
+  useFocusEffect(
+    useCallback(() => {
+      setScanned(false);
+      setCameraReady(false);
+      setCameraKey((k) => k + 1);
+      return () => {
+        setCameraReady(false);
+      };
+    }, [])
+  );
 
   if (!permission) {
     return (
@@ -54,16 +58,18 @@ export default function OfflineScanScreen() {
         <Pressable onPress={() => router.back()}>
           <Text style={styles.link}>Back</Text>
         </Pressable>
+        <Text style={[styles.tip, { marginTop: 24 }]}>
+          Or go back and use Share invite / Paste invite instead of the camera.
+        </Text>
       </View>
     );
   }
 
   function onBarcode({ data }: { data: string }) {
-    if (scanned || !data) return;
+    if (scanned || !cameraReady || !data) return;
     const decoded = decodeRoomPayload(data);
     if (!decoded || decoded.type !== expectType) {
-      // Ignore non-matching codes silently while scanning; only alert on clear bad payload once
-      if (data.includes('{') || data.length > 20) {
+      if (data.includes('{') || data.length > 40) {
         Alert.alert(
           'Invalid QR code',
           expectType === 'offer'
@@ -94,23 +100,24 @@ export default function OfflineScanScreen() {
 
   return (
     <View style={styles.container}>
-      {ready ? (
-        <CameraView
-          style={styles.camera}
-          facing="back"
-          active={!scanned}
-          barcodeScannerSettings={{
-            barcodeTypes: ['qr'],
-          }}
-          onBarcodeScanned={scanned ? undefined : onBarcode}
-        />
-      ) : (
-        <View style={[styles.camera, styles.cameraPlaceholder]}>
+      <CameraView
+        key={cameraKey}
+        style={styles.camera}
+        facing="back"
+        active
+        onCameraReady={() => setCameraReady(true)}
+        barcodeScannerSettings={{
+          barcodeTypes: ['qr'],
+        }}
+        onBarcodeScanned={scanned || !cameraReady ? undefined : onBarcode}
+      />
+
+      {!cameraReady && (
+        <View style={styles.loadingOverlay}>
           <Text style={styles.text}>Starting camera…</Text>
         </View>
       )}
 
-      {/* Dim overlay with clear scan window */}
       <View style={styles.mask} pointerEvents="none">
         <View style={styles.maskRow} />
         <View style={styles.maskMid}>
@@ -125,9 +132,17 @@ export default function OfflineScanScreen() {
         <Text style={styles.overlayText}>
           {expectType === 'offer' ? 'Scan host room QR' : 'Scan guest answer QR'}
         </Text>
-        <Text style={styles.tip}>Point the camera at the QR code on the other phone</Text>
+        <Text style={styles.tip}>Point at the QR on the other phone</Text>
         <Pressable style={styles.btn} onPress={() => router.back()}>
           <Text style={styles.btnText}>Cancel</Text>
+        </Pressable>
+        <Pressable
+          style={styles.linkBtn}
+          onPress={() => {
+            router.back();
+          }}
+        >
+          <Text style={styles.link}>Use Share / Paste invite instead</Text>
         </Pressable>
       </View>
     </View>
@@ -140,14 +155,14 @@ const styles = StyleSheet.create({
     backgroundColor: '#000',
   },
   camera: {
-    ...StyleSheet.absoluteFillObject,
+    flex: 1,
     width: '100%',
-    height: '100%',
   },
-  cameraPlaceholder: {
+  loadingOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: '#111',
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: '#111',
   },
   center: {
     flex: 1,
@@ -165,7 +180,8 @@ const styles = StyleSheet.create({
     marginTop: 12,
   },
   btnText: { color: '#fff', fontWeight: '600' },
-  link: { color: '#3b82f6', marginTop: 16 },
+  link: { color: '#93c5fd', marginTop: 8 },
+  linkBtn: { marginTop: 8 },
   mask: {
     ...StyleSheet.absoluteFillObject,
   },
@@ -191,7 +207,7 @@ const styles = StyleSheet.create({
   },
   overlay: {
     position: 'absolute',
-    bottom: Platform.OS === 'android' ? 40 : 48,
+    bottom: Platform.OS === 'android' ? 36 : 48,
     left: 0,
     right: 0,
     alignItems: 'center',
@@ -211,7 +227,7 @@ const styles = StyleSheet.create({
   tip: {
     color: '#cbd5e1',
     fontSize: 12,
-    marginBottom: 8,
+    marginBottom: 4,
     textAlign: 'center',
   },
 });

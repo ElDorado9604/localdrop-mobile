@@ -36,6 +36,7 @@
         "MODIFY_AUDIO_SETTINGS",
         "READ_EXTERNAL_STORAGE",
         "WRITE_EXTERNAL_STORAGE",
+        "android.permission.CAMERA",
         "CAMERA",
         "RECORD_AUDIO"
       ]
@@ -49,7 +50,10 @@
       [
         "expo-camera",
         {
-          "cameraPermission": "Allow LocalDrop to scan QR codes for offline room pairing"
+          "cameraPermission": "Allow LocalDrop to scan QR codes for offline room pairing",
+          "microphonePermission": "Allow LocalDrop to access your microphone",
+          "recordAudioAndroid": false,
+          "barcodeScannerEnabled": true
         }
       ],
       [

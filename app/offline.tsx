@@ -1,5 +1,6 @@
 /**
  * Offline File Transfer hub — Create Room / Join Room
+ * Pairing methods (NFC / Bluetooth / QR) are chosen on the next screen.
  */
 import { View, Text, StyleSheet, Pressable } from 'react-native';
 import { useRouter } from 'expo-router';
@@ -11,25 +12,19 @@ export default function OfflineHomeScreen() {
     <View style={styles.container}>
       <Text style={styles.title}>Offline File Transfer</Text>
       <Text style={styles.helper}>
-        Connect both devices to the same Wi‑Fi or hotspot to transfer files. No internet required.
+        Connect both devices to the same Wi‑Fi or hotspot. No internet required.
       </Text>
 
-      <Pressable
-        style={styles.primaryBtn}
-        onPress={() => router.push('/offline-host')}
-      >
+      <Pressable style={styles.primaryBtn} onPress={() => router.push('/offline-host')}>
         <Text style={styles.primaryBtnText}>Create Room</Text>
       </Pressable>
 
-      <Pressable
-        style={styles.secondaryBtn}
-        onPress={() => router.push('/offline-join')}
-      >
+      <Pressable style={styles.secondaryBtn} onPress={() => router.push('/offline-join')}>
         <Text style={styles.secondaryBtnText}>Join Room</Text>
       </Pressable>
 
       <Text style={styles.note}>
-        Host shows a QR code and 6-digit passcode. Guest scans the QR or uses the shared invite.
+        On the next screen you can choose: Tap (NFC), Connect nearby (Bluetooth), or Scan QR.
       </Text>
     </View>
   );

@@ -47,6 +47,12 @@
       "expo-router",
       "expo-document-picker",
       [
+        "expo-camera",
+        {
+          "cameraPermission": "Allow LocalDrop to scan QR codes for offline room pairing"
+        }
+      ],
+      [
         "./plugins/withWebRTC.js",
         {
           "cameraPermission": "Allow LocalDrop to access your camera for offline pairing",

@@ -1,7 +1,7 @@
 /**
  * Create Room: show QR + passcode, wait for join, accept/reject, then session.
  */
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, useCallback } from 'react';
 import {
   View,
   Text,
@@ -13,7 +13,7 @@ import {
   Share,
   Platform,
 } from 'react-native';
-import { useRouter } from 'expo-router';
+import { useRouter, useFocusEffect } from 'expo-router';
 import QRCode from 'react-native-qrcode-svg';
 import { WebRTCSession } from '../src/lib/webrtcSession';
 import {
@@ -38,6 +38,41 @@ export default function OfflineHostScreen() {
   const [error, setError] = useState<string | null>(null);
   const sessionRef = useRef<WebRTCSession | null>(null);
   const codeRef = useRef('');
+  const peerNameRef = useRef('peer');
+
+  const onAnswerScanned = useCallback((raw: string) => {
+    const decoded = decodeRoomPayload(raw);
+    if (!decoded || decoded.type !== 'answer') {
+      Alert.alert(
+        'Invalid QR code',
+        'Scan the answer QR from the other device.'
+      );
+      return;
+    }
+    if (codeRef.current && decoded.code && decoded.code !== codeRef.current) {
+      Alert.alert('Invalid room passcode', 'This answer is for a different room.');
+      return;
+    }
+    peerNameRef.current = decoded.name;
+    setPendingJoin({ name: decoded.name, sdp: decoded.sdp, code: decoded.code });
+    setPhase('review-join');
+  }, []);
+
+  useFocusEffect(
+    useCallback(() => {
+      (global as any).__localdropOnAnswerScanned = onAnswerScanned;
+      const pending = (global as any).__localdropPendingAnswer as string | undefined;
+      if (pending) {
+        (global as any).__localdropPendingAnswer = undefined;
+        onAnswerScanned(pending);
+      }
+      return () => {
+        if ((global as any).__localdropOnAnswerScanned === onAnswerScanned) {
+          (global as any).__localdropOnAnswerScanned = undefined;
+        }
+      };
+    }, [onAnswerScanned])
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -55,7 +90,7 @@ export default function OfflineHostScreen() {
           onOpen: () => {
             if (cancelled) return;
             setOfflineSession(session, {
-              peerName: pendingJoin?.name || 'peer',
+              peerName: peerNameRef.current,
               roomCode: codeRef.current,
               isHost: true,
             });
@@ -90,26 +125,12 @@ export default function OfflineHostScreen() {
     return () => {
       cancelled = true;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [router]);
-
-  function onAnswerScanned(raw: string) {
-    const decoded = decodeRoomPayload(raw);
-    if (!decoded || decoded.type !== 'answer') {
-      Alert.alert('Invalid QR code', 'Scan the answer QR from the other device, or enter the passcode invite.');
-      return;
-    }
-    if (codeRef.current && decoded.code && decoded.code !== codeRef.current) {
-      Alert.alert('Invalid room passcode', 'This answer is for a different room.');
-      return;
-    }
-    setPendingJoin({ name: decoded.name, sdp: decoded.sdp, code: decoded.code });
-    setPhase('review-join');
-  }
 
   async function acceptJoin() {
     if (!pendingJoin || !sessionRef.current) return;
     setPhase('connecting');
+    peerNameRef.current = pendingJoin.name;
     try {
       setOfflineSession(sessionRef.current, {
         peerName: pendingJoin.name,
@@ -156,7 +177,7 @@ export default function OfflineHostScreen() {
     <ScrollView style={styles.container} contentContainerStyle={styles.content}>
       <Text style={styles.title}>Create Room</Text>
       <Text style={styles.hint}>
-        Ask the other device to scan this QR code or share the invite. Same Wi‑Fi or hotspot required.
+        Ask the other device to scan this QR code or use Share invite. Same Wi‑Fi or hotspot required.
       </Text>
 
       {phase === 'creating' && (
@@ -230,9 +251,6 @@ export default function OfflineHostScreen() {
   );
 }
 
-// Allow scan screen to call back via global (simple bridge without context)
-(global as any).__localdropOnAnswerScanned = undefined;
-
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#0f0f0f' },
   content: { padding: 24, paddingBottom: 48 },
@@ -298,7 +316,3 @@ const styles = StyleSheet.create({
   },
   error: { color: '#ef4444', textAlign: 'center', marginTop: 16 },
 });
-
-export function registerAnswerHandler(fn: (raw: string) => void) {
-  (global as any).__localdropOnAnswerScanned = fn;
-}

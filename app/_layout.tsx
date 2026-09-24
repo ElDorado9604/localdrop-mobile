@@ -24,9 +24,11 @@ export default function RootLayout() {
         <Stack.Screen name="send" options={{ title: 'Send Files' }} />
         <Stack.Screen name="receive" options={{ title: 'Receive Files' }} />
         <Stack.Screen name="transfer" options={{ title: 'Transfer' }} />
-        <Stack.Screen name="offline-host" options={{ title: 'Offline Host' }} />
-        <Stack.Screen name="offline-join" options={{ title: 'Offline Join' }} />
-        <Stack.Screen name="offline-session" options={{ title: 'Offline Session' }} />
+        <Stack.Screen name="offline" options={{ title: 'Offline File Transfer' }} />
+        <Stack.Screen name="offline-host" options={{ title: 'Create Room' }} />
+        <Stack.Screen name="offline-join" options={{ title: 'Join Room' }} />
+        <Stack.Screen name="offline-scan" options={{ title: 'Scan QR', headerShown: false }} />
+        <Stack.Screen name="offline-session" options={{ title: 'Connected Room' }} />
         <Stack.Screen name="received" options={{ title: 'Files Received' }} />
       </Stack>
     </SafeAreaProvider>

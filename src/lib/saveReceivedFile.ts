@@ -32,11 +32,6 @@ function randomId(): string {
   return `${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 9)}`;
 }
 
-/**
- * Turn a SAF tree URI into a readable path when possible.
- * e.g. content://…/tree/primary%3ADownload%2FLocalDrop
- *   → /storage/emulated/0/Download/LocalDrop
- */
 export function humanPathFromSafUri(uri: string): string {
   try {
     const treeMatch = uri.match(/\/tree\/([^?]+)/);
@@ -76,7 +71,6 @@ export async function getSaveDirectoryLabel(): Promise<string> {
   let label = await AsyncStorage.getItem(SAVE_LABEL_KEY);
   const uri = await getSaveDirectoryUri();
 
-  // Upgrade old generic labels from URI when possible
   if (uri && (!label || label === 'Selected folder' || label === FOLDER_NAME)) {
     const human = humanPathFromSafUri(uri);
     if (human && human !== 'Selected folder') {
@@ -164,14 +158,19 @@ export async function removeFromReceivedIndex(id: string) {
   await writeIndex(list.filter((x) => x.id !== id));
 }
 
+/** Remove entries from the app list only — files stay on disk. */
+export async function removeManyFromReceivedIndex(ids: string[]) {
+  if (!ids.length) return;
+  const set = new Set(ids);
+  const list = await readIndex();
+  await writeIndex(list.filter((x) => !set.has(x.id)));
+}
+
 export async function ensureSaveFolderOrPrompt(): Promise<boolean> {
   if (await hasSaveDirectory()) return true;
   return false;
 }
 
-/**
- * Resolve content:// to a file:// cache path so Expo Sharing works.
- */
 export async function resolveShareableUri(
   path: string,
   fileName: string

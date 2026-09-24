@@ -1,5 +1,5 @@
 /**
- * Offline joiner: paste offer → create answer → share answer → wait for channel.
+ * Join Room: Scan QR or enter/share invite (passcode path via shared payload).
  */
 import { useRef, useState } from 'react';
 import {
@@ -12,31 +12,51 @@ import {
   ScrollView,
   Alert,
   Share,
+  Platform,
 } from 'react-native';
-import { useRouter } from 'expo-router';
+import { useRouter, useFocusEffect } from 'expo-router';
+import { useCallback } from 'react';
+import QRCode from 'react-native-qrcode-svg';
 import { WebRTCSession } from '../src/lib/webrtcSession';
-import { encodeSignal, decodeSignal } from '../src/lib/offlineSignal';
+import { encodeRoomAnswer, decodeRoomPayload } from '../src/lib/offlineSignal';
 import { setOfflineSession } from '../src/lib/offlineSessionStore';
+
+const DEVICE_NAME = Platform.OS === 'ios' ? 'iPhone' : 'Android Device';
 
 export default function OfflineJoinScreen() {
   const router = useRouter();
-  const [phase, setPhase] = useState<'paste-offer' | 'creating' | 'show-answer' | 'waiting' | 'failed'>(
-    'paste-offer'
-  );
-  const [offerText, setOfferText] = useState('');
+  const [phase, setPhase] = useState<
+    'choose' | 'passcode' | 'creating' | 'show-answer' | 'waiting' | 'failed'
+  >('choose');
+  const [inviteText, setInviteText] = useState('');
   const [answerPayload, setAnswerPayload] = useState<string | null>(null);
+  const [hostName, setHostName] = useState('Host');
+  const [roomCode, setRoomCode] = useState('');
   const [error, setError] = useState<string | null>(null);
   const sessionRef = useRef<WebRTCSession | null>(null);
 
-  async function applyOffer() {
-    const decoded = decodeSignal(offerText);
+  // Receive scan result from offline-scan
+  useFocusEffect(
+    useCallback(() => {
+      const pending = (global as any).__localdropPendingOffer as string | undefined;
+      if (pending) {
+        (global as any).__localdropPendingOffer = undefined;
+        void applyOfferRaw(pending);
+      }
+    }, [])
+  );
+
+  async function applyOfferRaw(raw: string) {
+    const decoded = decodeRoomPayload(raw);
     if (!decoded || decoded.type !== 'offer') {
-      Alert.alert('Invalid', 'Paste the offer payload from the host device');
+      Alert.alert('Invalid QR code', 'Scan the host’s room QR code again or paste a valid invite.');
       return;
     }
 
     setPhase('creating');
     setError(null);
+    setHostName(decoded.name);
+    setRoomCode(decoded.code);
 
     try {
       const session = new WebRTCSession();
@@ -44,7 +64,11 @@ export default function OfflineJoinScreen() {
 
       session.setHandlers({
         onOpen: () => {
-          setOfflineSession(session, 'peer');
+          setOfflineSession(session, {
+            peerName: decoded.name,
+            roomCode: decoded.code,
+            isHost: false,
+          });
           router.replace({ pathname: '/offline-session', params: { role: 'join' } });
         },
         onFailed: (reason) => {
@@ -54,46 +78,80 @@ export default function OfflineJoinScreen() {
       });
 
       const answer = await session.handleOfferForQr(decoded.sdp);
-      const payload = encodeSignal('answer', answer);
+      const payload = encodeRoomAnswer({
+        code: decoded.code,
+        name: DEVICE_NAME,
+        sdp: answer,
+      });
       setAnswerPayload(payload);
       setPhase('show-answer');
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to create answer');
+      setError(e instanceof Error ? e.message : 'Failed to join room');
       setPhase('failed');
     }
+  }
+
+  function submitInvite() {
+    if (!inviteText.trim()) {
+      Alert.alert('Invalid room passcode', 'Paste the full invite from the host (or scan their QR).');
+      return;
+    }
+    void applyOfferRaw(inviteText);
   }
 
   async function shareAnswer() {
     if (!answerPayload) return;
     await Share.share({
       message: answerPayload,
-      title: 'LocalDrop offline answer',
+      title: 'LocalDrop join answer',
     });
     setPhase('waiting');
   }
 
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.content}>
-      <Text style={styles.title}>Offline pair — Join</Text>
+      <Text style={styles.title}>Join Room</Text>
       <Text style={styles.hint}>
-        Paste the host’s offer, share your answer back, then wait for the link.
+        Scan the host’s QR code, or paste the shared invite. Both devices need the same Wi‑Fi or hotspot.
       </Text>
 
-      {phase === 'paste-offer' && (
+      {phase === 'choose' && (
         <View>
-          <Text style={styles.label}>Paste offer from host</Text>
+          <Pressable
+            style={styles.primaryBtn}
+            onPress={() =>
+              router.push({ pathname: '/offline-scan', params: { mode: 'offer' } })
+            }
+          >
+            <Text style={styles.primaryBtnText}>Scan QR Code</Text>
+          </Pressable>
+
+          <Pressable style={styles.secondaryBtn} onPress={() => setPhase('passcode')}>
+            <Text style={styles.secondaryBtnText}>Enter Passcode / Invite</Text>
+          </Pressable>
+        </View>
+      )}
+
+      {phase === 'passcode' && (
+        <View>
+          <Text style={styles.label}>
+            Paste the full invite shared by the host (includes room passcode + connection data).
+          </Text>
           <TextInput
             style={styles.input}
-            value={offerText}
-            onChangeText={setOfferText}
-            placeholder="Paste offer JSON…"
+            value={inviteText}
+            onChangeText={setInviteText}
+            placeholder="Paste invite…"
             placeholderTextColor="#555"
             multiline
             autoCapitalize="none"
             autoCorrect={false}
           />
-          <Pressable style={styles.primaryBtn} onPress={applyOffer}>
-            <Text style={styles.primaryBtnText}>Create answer</Text>
+          <Pressable style={styles.primaryBtn} onPress={submitInvite}>
+            <Text style={styles.primaryBtnText}>Join</Text>
+          </Pressable>
+          <Pressable style={styles.linkBtn} onPress={() => setPhase('choose')}>
+            <Text style={styles.linkText}>Back</Text>
           </Pressable>
         </View>
       )}
@@ -101,33 +159,35 @@ export default function OfflineJoinScreen() {
       {phase === 'creating' && (
         <View style={styles.center}>
           <ActivityIndicator color="#3b82f6" size="large" />
-          <Text style={styles.status}>Creating answer…</Text>
+          <Text style={styles.status}>Joining room…</Text>
         </View>
       )}
 
       {(phase === 'show-answer' || phase === 'waiting') && answerPayload && (
-        <View>
-          <Text style={styles.label}>Send this answer to the host</Text>
-          <Text style={styles.payload} selectable>
-            {answerPayload}
+        <View style={styles.center}>
+          <Text style={styles.label}>
+            Connected to {hostName}
+            {roomCode ? ` · code ${roomCode}` : ''}
           </Text>
+          <Text style={styles.sub}>
+            Show this QR to the host (or Share). Host must Accept to finish pairing.
+          </Text>
+          <View style={styles.qrBox}>
+            <QRCode value={answerPayload} size={220} backgroundColor="#fff" color="#000" />
+          </View>
           <Pressable style={styles.primaryBtn} onPress={shareAnswer}>
             <Text style={styles.primaryBtnText}>Share answer</Text>
           </Pressable>
           {phase === 'waiting' && (
-            <View style={[styles.center, { marginTop: 24 }]}>
+            <View style={{ marginTop: 16 }}>
               <ActivityIndicator color="#3b82f6" />
-              <Text style={styles.status}>Waiting for host to connect…</Text>
+              <Text style={styles.status}>Waiting for host to accept…</Text>
             </View>
           )}
         </View>
       )}
 
       {error && <Text style={styles.error}>{error}</Text>}
-
-      <Pressable style={styles.homeBtn} onPress={() => router.back()}>
-        <Text style={styles.homeText}>Back</Text>
-      </Pressable>
     </ScrollView>
   );
 }
@@ -137,17 +197,14 @@ const styles = StyleSheet.create({
   content: { padding: 24, paddingBottom: 48 },
   title: { color: '#fff', fontSize: 22, fontWeight: '700', textAlign: 'center' },
   hint: { color: '#888', textAlign: 'center', marginTop: 8, marginBottom: 24, fontSize: 13 },
-  center: { alignItems: 'center', marginVertical: 24 },
-  status: { color: '#aaa', marginTop: 12 },
-  label: { color: '#fff', fontWeight: '600', marginBottom: 8 },
-  payload: {
-    color: '#94a3b8',
-    fontSize: 11,
-    backgroundColor: '#1a1a1a',
-    padding: 12,
-    borderRadius: 10,
-    marginBottom: 12,
-    maxHeight: 140,
+  center: { alignItems: 'center' },
+  label: { color: '#fff', fontWeight: '600', marginBottom: 8, textAlign: 'center' },
+  sub: { color: '#94a3b8', fontSize: 13, textAlign: 'center', marginBottom: 16 },
+  qrBox: {
+    backgroundColor: '#fff',
+    padding: 16,
+    borderRadius: 16,
+    marginBottom: 16,
   },
   input: {
     backgroundColor: '#1a1a1a',
@@ -164,16 +221,20 @@ const styles = StyleSheet.create({
     borderRadius: 14,
     paddingVertical: 14,
     alignItems: 'center',
+    marginBottom: 12,
+    minWidth: 220,
   },
   primaryBtnText: { color: '#fff', fontWeight: '600' },
-  error: { color: '#ef4444', textAlign: 'center', marginTop: 16 },
-  homeBtn: {
-    marginTop: 32,
+  secondaryBtn: {
     borderWidth: 1,
     borderColor: '#333',
-    borderRadius: 12,
+    borderRadius: 14,
     paddingVertical: 14,
     alignItems: 'center',
   },
-  homeText: { color: '#fff' },
+  secondaryBtnText: { color: '#fff', fontWeight: '600' },
+  linkBtn: { marginTop: 12, alignItems: 'center' },
+  linkText: { color: '#3b82f6' },
+  status: { color: '#aaa', marginTop: 12, textAlign: 'center' },
+  error: { color: '#ef4444', textAlign: 'center', marginTop: 16 },
 });

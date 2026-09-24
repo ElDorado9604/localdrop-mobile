@@ -1,5 +1,5 @@
 /**
- * Three equal offline pairing options: NFC, Bluetooth, QR.
+ * Three equal offline pairing options: NFC, Nearby (auto), QR.
  */
 import { View, Text, StyleSheet, Pressable, Alert } from 'react-native';
 
@@ -16,20 +16,12 @@ export function PairingMethodPicker({ title, subtitle, onSelect }: Props) {
     if (method === 'nfc') {
       Alert.alert(
         'Tap to pair (NFC)',
-        'Coming in a next update. For now use Bluetooth or Scan QR.',
+        'Coming in a next update. For now use Connect nearby or Scan QR.',
         [{ text: 'OK' }]
       );
       return;
     }
-    if (method === 'ble') {
-      Alert.alert(
-        'Connect nearby (Bluetooth)',
-        'Coming in a next update. For now use Scan QR. Bluetooth will exchange pairing data without a second scan.',
-        [{ text: 'OK' }]
-      );
-      return;
-    }
-    onSelect('qr');
+    onSelect(method);
   }
 
   return (
@@ -45,10 +37,12 @@ export function PairingMethodPicker({ title, subtitle, onSelect }: Props) {
         <Text style={styles.badge}>Soon</Text>
       </Pressable>
 
-      <Pressable style={styles.card} onPress={() => select('ble')}>
-        <Text style={styles.cardTitle}>Connect nearby (Bluetooth)</Text>
-        <Text style={styles.cardBody}>Find the other device automatically</Text>
-        <Text style={styles.badge}>Soon</Text>
+      <Pressable style={[styles.card, styles.cardLive]} onPress={() => select('ble')}>
+        <Text style={styles.cardTitle}>Connect nearby</Text>
+        <Text style={styles.cardBody}>
+          Automatic pair on the same Wi‑Fi or hotspot (no QR)
+        </Text>
+        <Text style={[styles.badge, styles.badgeLive]}>Available</Text>
       </Pressable>
 
       <Pressable style={[styles.card, styles.cardLive]} onPress={() => select('qr')}>

@@ -153,41 +153,45 @@ export default function HomeScreen() {
         <Text style={styles.modeHint}>
           {mode === 'online'
             ? 'Uses signaling server for code / QR pairing'
-            : 'No internet — share offer/answer on same Wi‑Fi, then send both ways'}
+            : 'No internet — Create/Join room with QR or passcode on same Wi‑Fi'}
         </Text>
       </View>
 
       <View style={styles.actions}>
-        <Link href={{ pathname: '/send', params: { mode } }} asChild>
-          <Pressable style={styles.primaryButton}>
-            <Text style={styles.primaryButtonText}>
-              {mode === 'offline' ? 'Host offline session' : 'Send Files'}
-            </Text>
+        {mode === 'offline' ? (
+          <Pressable style={styles.primaryButton} onPress={() => router.push('/offline')}>
+            <Text style={styles.primaryButtonText}>Open Offline Transfer</Text>
           </Pressable>
-        </Link>
+        ) : (
+          <>
+            <Link href={{ pathname: '/send', params: { mode: 'online' } }} asChild>
+              <Pressable style={styles.primaryButton}>
+                <Text style={styles.primaryButtonText}>Send Files</Text>
+              </Pressable>
+            </Link>
 
-        <Link href={{ pathname: '/receive', params: { mode } }} asChild>
-          <Pressable
-            style={styles.secondaryButton}
-            onPress={(e) => {
-              if (!hasFolder && Platform.OS === 'android') {
-                e.preventDefault?.();
-                Alert.alert(
-                  'Set save folder first',
-                  'Create or select a folder in the system picker so received files appear in Files.',
-                  [
-                    { text: 'Cancel', style: 'cancel' },
-                    { text: 'Choose folder', onPress: () => void chooseFolder() },
-                  ]
-                );
-              }
-            }}
-          >
-            <Text style={styles.secondaryButtonText}>
-              {mode === 'offline' ? 'Join offline session' : 'Receive Files'}
-            </Text>
-          </Pressable>
-        </Link>
+            <Link href={{ pathname: '/receive', params: { mode: 'online' } }} asChild>
+              <Pressable
+                style={styles.secondaryButton}
+                onPress={(e) => {
+                  if (!hasFolder && Platform.OS === 'android') {
+                    e.preventDefault?.();
+                    Alert.alert(
+                      'Set save folder first',
+                      'Create or select a folder in the system picker so received files appear in Files.',
+                      [
+                        { text: 'Cancel', style: 'cancel' },
+                        { text: 'Choose folder', onPress: () => void chooseFolder() },
+                      ]
+                    );
+                  }
+                }}
+              >
+                <Text style={styles.secondaryButtonText}>Receive Files</Text>
+              </Pressable>
+            </Link>
+          </>
+        )}
       </View>
 
       <View style={styles.receivedSection}>

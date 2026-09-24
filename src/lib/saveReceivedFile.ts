@@ -1,10 +1,10 @@
 /**
- * Phase 1 storage: one public folder only (system Files app).
- * User picks a parent (e.g. Downloads); we prefer a LocalDrop subfolder.
+ * Public save folder only (system Files app).
+ * User picks or creates the folder themselves — we never create a subfolder.
  * No second copy in app-private Documents.
  */
 
-import { Platform, Alert } from 'react-native';
+import { Platform } from 'react-native';
 import * as FileSystem from 'expo-file-system/legacy';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
@@ -47,15 +47,14 @@ export async function hasSaveDirectory(): Promise<boolean> {
 }
 
 /**
- * Ask user to pick a parent folder (e.g. Downloads).
- * Tries to create LocalDrop inside it; falls back to the selected folder.
+ * Ask user to pick (or create) a folder in the system picker.
+ * We use that folder as-is — no LocalDrop subfolder is created by the app.
  * Call only when NOT in an active transfer.
  */
 export async function setupPublicSaveFolder(): Promise<boolean> {
   if (Platform.OS !== 'android') {
-    // iOS: use app documents (visible in Files with UIFileSharingEnabled)
-    const dir =
-      (FileSystem.documentDirectory || '') + FOLDER_NAME + '/';
+    // iOS: app documents (visible in Files with UIFileSharingEnabled)
+    const dir = (FileSystem.documentDirectory || '') + FOLDER_NAME + '/';
     await FileSystem.makeDirectoryAsync(dir, { intermediates: true }).catch(() => {});
     await AsyncStorage.setItem(SAVE_DIR_KEY, dir);
     await AsyncStorage.setItem(SAVE_LABEL_KEY, FOLDER_NAME);
@@ -66,26 +65,9 @@ export async function setupPublicSaveFolder(): Promise<boolean> {
     const perms = await FileSystem.StorageAccessFramework.requestDirectoryPermissionsAsync();
     if (!perms.granted || !perms.directoryUri) return false;
 
-    let targetUri = perms.directoryUri;
-    let label = FOLDER_NAME;
-
-    // Prefer a LocalDrop subfolder under the parent the user chose
-    try {
-      const sub = await FileSystem.StorageAccessFramework.makeDirectoryAsync(
-        perms.directoryUri,
-        FOLDER_NAME
-      );
-      if (sub) {
-        targetUri = sub;
-        label = FOLDER_NAME;
-      }
-    } catch {
-      // Parent may already contain LocalDrop or SAF may not allow mkdir — use parent
-      label = 'Selected folder';
-    }
-
-    await AsyncStorage.setItem(SAVE_DIR_KEY, targetUri);
-    await AsyncStorage.setItem(SAVE_LABEL_KEY, label);
+    // Use exactly the folder the user selected / created — do not mkdir
+    await AsyncStorage.setItem(SAVE_DIR_KEY, perms.directoryUri);
+    await AsyncStorage.setItem(SAVE_LABEL_KEY, 'Selected folder');
     return true;
   } catch {
     return false;
@@ -159,7 +141,7 @@ export async function saveReceivedFile(
 ): Promise<{ path: string; displayPath: string; id: string }> {
   const dirUri = await getSaveDirectoryUri();
   if (!dirUri) {
-    throw new Error('Save folder not set. Open Home and choose a LocalDrop folder first.');
+    throw new Error('Save folder not set. Open Home and choose a folder first.');
   }
 
   const name = safeFileName(fileName);
@@ -170,7 +152,6 @@ export async function saveReceivedFile(
   let finalPath: string;
 
   if (Platform.OS === 'android' && dirUri.startsWith('content://')) {
-    // SAF public folder
     finalPath = await FileSystem.StorageAccessFramework.createFileAsync(
       dirUri,
       name,
@@ -180,7 +161,6 @@ export async function saveReceivedFile(
       encoding: FileSystem.EncodingType.Base64,
     });
   } else {
-    // file:// (iOS documents or similar)
     await FileSystem.makeDirectoryAsync(dirUri, { intermediates: true }).catch(() => {});
     let path = dirUri.endsWith('/') ? dirUri + name : dirUri + '/' + name;
     try {
@@ -220,19 +200,15 @@ export async function saveReceivedFile(
   return { path: finalPath, displayPath, id };
 }
 
-/** Called on app start — does not create private folder; only validates config. */
 export async function initLocalDropStorage(): Promise<void> {
-  // No-op for private dir. Folder is user-chosen.
+  // Folder is user-chosen on Android.
 }
 
-/** Legacy helpers kept so older screens compile during transition. */
 export function getAppLocalDropDir(): string {
   return (FileSystem.documentDirectory || '') + FOLDER_NAME + '/';
 }
 
 export async function ensureAppLocalDropDir(): Promise<string> {
-  // Phase 1: do not use internal folder for receives.
-  // Return empty marker; saveReceivedFile requires public dir.
   const uri = await getSaveDirectoryUri();
   if (uri) return uri;
   return getAppLocalDropDir();

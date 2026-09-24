@@ -1,7 +1,7 @@
 /**
- * Join Room: Scan QR or enter/share invite (passcode path via shared payload).
+ * Join Room: pick NFC / BLE / QR, then continue.
  */
-import { useRef, useState } from 'react';
+import { useRef, useState, useCallback } from 'react';
 import {
   View,
   Text,
@@ -15,19 +15,19 @@ import {
   Platform,
 } from 'react-native';
 import { useRouter, useFocusEffect } from 'expo-router';
-import { useCallback } from 'react';
 import QRCode from 'react-native-qrcode-svg';
 import { WebRTCSession } from '../src/lib/webrtcSession';
 import { encodeRoomAnswer, decodeRoomPayload } from '../src/lib/offlineSignal';
 import { setOfflineSession } from '../src/lib/offlineSessionStore';
+import { PairingMethodPicker } from '../src/components/PairingMethodPicker';
 
 const DEVICE_NAME = Platform.OS === 'ios' ? 'iPhone' : 'Android Device';
 
 export default function OfflineJoinScreen() {
   const router = useRouter();
   const [phase, setPhase] = useState<
-    'choose' | 'passcode' | 'creating' | 'show-answer' | 'waiting' | 'failed'
-  >('choose');
+    'choose-method' | 'qr-options' | 'passcode' | 'creating' | 'show-answer' | 'waiting' | 'failed'
+  >('choose-method');
   const [inviteText, setInviteText] = useState('');
   const [answerPayload, setAnswerPayload] = useState<string | null>(null);
   const [hostName, setHostName] = useState('Host');
@@ -35,7 +35,6 @@ export default function OfflineJoinScreen() {
   const [error, setError] = useState<string | null>(null);
   const sessionRef = useRef<WebRTCSession | null>(null);
 
-  // Receive scan result from offline-scan
   useFocusEffect(
     useCallback(() => {
       const pending = (global as any).__localdropPendingOffer as string | undefined;
@@ -93,7 +92,7 @@ export default function OfflineJoinScreen() {
 
   function submitInvite() {
     if (!inviteText.trim()) {
-      Alert.alert('Invalid room passcode', 'Paste the full invite from the host (or scan their QR).');
+      Alert.alert('Invalid invite', 'Paste the full invite from the host (or scan their QR).');
       return;
     }
     void applyOfferRaw(inviteText);
@@ -110,13 +109,20 @@ export default function OfflineJoinScreen() {
 
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.content}>
-      <Text style={styles.title}>Join Room</Text>
-      <Text style={styles.hint}>
-        Scan the host’s QR code, or paste the shared invite. Both devices need the same Wi‑Fi or hotspot.
-      </Text>
+      {phase === 'choose-method' && (
+        <PairingMethodPicker
+          title="Join Room"
+          subtitle="Both devices need the same Wi‑Fi or hotspot. Choose how to pair."
+          onSelect={(m) => {
+            if (m === 'qr') setPhase('qr-options');
+          }}
+        />
+      )}
 
-      {phase === 'choose' && (
+      {phase === 'qr-options' && (
         <View>
+          <Text style={styles.title}>Join · QR</Text>
+          <Text style={styles.hint}>Scan the host’s QR or paste their shared invite.</Text>
           <Pressable
             style={styles.primaryBtn}
             onPress={() =>
@@ -125,18 +131,18 @@ export default function OfflineJoinScreen() {
           >
             <Text style={styles.primaryBtnText}>Scan QR Code</Text>
           </Pressable>
-
           <Pressable style={styles.secondaryBtn} onPress={() => setPhase('passcode')}>
-            <Text style={styles.secondaryBtnText}>Enter Passcode / Invite</Text>
+            <Text style={styles.secondaryBtnText}>Paste invite</Text>
+          </Pressable>
+          <Pressable style={styles.linkBtn} onPress={() => setPhase('choose-method')}>
+            <Text style={styles.linkText}>Back</Text>
           </Pressable>
         </View>
       )}
 
       {phase === 'passcode' && (
         <View>
-          <Text style={styles.label}>
-            Paste the full invite shared by the host (includes room passcode + connection data).
-          </Text>
+          <Text style={styles.label}>Paste the full invite from the host</Text>
           <TextInput
             style={styles.input}
             value={inviteText}
@@ -150,7 +156,7 @@ export default function OfflineJoinScreen() {
           <Pressable style={styles.primaryBtn} onPress={submitInvite}>
             <Text style={styles.primaryBtnText}>Join</Text>
           </Pressable>
-          <Pressable style={styles.linkBtn} onPress={() => setPhase('choose')}>
+          <Pressable style={styles.linkBtn} onPress={() => setPhase('qr-options')}>
             <Text style={styles.linkText}>Back</Text>
           </Pressable>
         </View>
@@ -166,8 +172,8 @@ export default function OfflineJoinScreen() {
       {(phase === 'show-answer' || phase === 'waiting') && answerPayload && (
         <View style={styles.center}>
           <Text style={styles.label}>
-            Connected to {hostName}
-            {roomCode ? ` · code ${roomCode}` : ''}
+            Room with {hostName}
+            {roomCode ? ` · ${roomCode}` : ''}
           </Text>
           <Text style={styles.sub}>
             Show this QR to the host (or Share). Host must Accept to finish pairing.

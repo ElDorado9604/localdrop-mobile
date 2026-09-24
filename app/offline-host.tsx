@@ -1,5 +1,5 @@
 /**
- * Create Room: show QR + passcode, wait for join, accept/reject, then session.
+ * Create Room: pick pairing method (NFC / BLE / QR), then run that transport.
  */
 import { useEffect, useRef, useState, useCallback } from 'react';
 import {
@@ -22,14 +22,15 @@ import {
   generateRoomCode,
 } from '../src/lib/offlineSignal';
 import { setOfflineSession, clearOfflineSession } from '../src/lib/offlineSessionStore';
+import { PairingMethodPicker } from '../src/components/PairingMethodPicker';
 
 const DEVICE_NAME = Platform.OS === 'ios' ? 'iPhone' : 'Android Device';
 
 export default function OfflineHostScreen() {
   const router = useRouter();
   const [phase, setPhase] = useState<
-    'creating' | 'waiting' | 'review-join' | 'connecting' | 'failed'
-  >('creating');
+    'choose-method' | 'creating' | 'waiting' | 'review-join' | 'connecting' | 'failed'
+  >('choose-method');
   const [roomCode, setRoomCode] = useState('');
   const [offerPayload, setOfferPayload] = useState<string | null>(null);
   const [pendingJoin, setPendingJoin] = useState<{ name: string; sdp: any; code: string } | null>(
@@ -39,14 +40,12 @@ export default function OfflineHostScreen() {
   const sessionRef = useRef<WebRTCSession | null>(null);
   const codeRef = useRef('');
   const peerNameRef = useRef('peer');
+  const startedRef = useRef(false);
 
   const onAnswerScanned = useCallback((raw: string) => {
     const decoded = decodeRoomPayload(raw);
     if (!decoded || decoded.type !== 'answer') {
-      Alert.alert(
-        'Invalid QR code',
-        'Scan the answer QR from the other device.'
-      );
+      Alert.alert('Invalid QR code', 'Scan the answer QR from the other device.');
       return;
     }
     if (codeRef.current && decoded.code && decoded.code !== codeRef.current) {
@@ -74,58 +73,49 @@ export default function OfflineHostScreen() {
     }, [onAnswerScanned])
   );
 
-  useEffect(() => {
-    let cancelled = false;
+  async function startQrRoom() {
+    if (startedRef.current) return;
+    startedRef.current = true;
+    setPhase('creating');
+    setError(null);
 
-    async function start() {
-      try {
-        const code = generateRoomCode();
-        codeRef.current = code;
-        setRoomCode(code);
+    try {
+      const code = generateRoomCode();
+      codeRef.current = code;
+      setRoomCode(code);
 
-        const session = new WebRTCSession();
-        sessionRef.current = session;
+      const session = new WebRTCSession();
+      sessionRef.current = session;
 
-        session.setHandlers({
-          onOpen: () => {
-            if (cancelled) return;
-            setOfflineSession(session, {
-              peerName: peerNameRef.current,
-              roomCode: codeRef.current,
-              isHost: true,
-            });
-            router.replace({ pathname: '/offline-session', params: { role: 'host' } });
-          },
-          onFailed: (reason) => {
-            if (!cancelled) {
-              setError(reason);
-              setPhase('failed');
-            }
-          },
-        });
-
-        const local = await session.createOfferForQr();
-        if (cancelled) return;
-        const payload = encodeRoomOffer({
-          code,
-          name: DEVICE_NAME,
-          sdp: local,
-        });
-        setOfferPayload(payload);
-        setPhase('waiting');
-      } catch (e) {
-        if (!cancelled) {
-          setError(e instanceof Error ? e.message : 'Failed to create room');
+      session.setHandlers({
+        onOpen: () => {
+          setOfflineSession(session, {
+            peerName: peerNameRef.current,
+            roomCode: codeRef.current,
+            isHost: true,
+          });
+          router.replace({ pathname: '/offline-session', params: { role: 'host' } });
+        },
+        onFailed: (reason) => {
+          setError(reason);
           setPhase('failed');
-        }
-      }
-    }
+        },
+      });
 
-    void start();
-    return () => {
-      cancelled = true;
-    };
-  }, [router]);
+      const local = await session.createOfferForQr();
+      const payload = encodeRoomOffer({
+        code,
+        name: DEVICE_NAME,
+        sdp: local,
+      });
+      setOfferPayload(payload);
+      setPhase('waiting');
+    } catch (e) {
+      startedRef.current = false;
+      setError(e instanceof Error ? e.message : 'Failed to create room');
+      setPhase('failed');
+    }
+  }
 
   async function acceptJoin() {
     if (!pendingJoin || !sessionRef.current) return;
@@ -167,6 +157,7 @@ export default function OfflineHostScreen() {
         onPress: () => {
           clearOfflineSession();
           sessionRef.current?.close();
+          startedRef.current = false;
           router.replace('/offline');
         },
       },
@@ -175,10 +166,15 @@ export default function OfflineHostScreen() {
 
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.content}>
-      <Text style={styles.title}>Create Room</Text>
-      <Text style={styles.hint}>
-        Ask the other device to scan this QR code or use Share invite. Same Wi‑Fi or hotspot required.
-      </Text>
+      {phase === 'choose-method' && (
+        <PairingMethodPicker
+          title="Create Room"
+          subtitle="Both devices need the same Wi‑Fi or hotspot. Choose how to pair."
+          onSelect={(m) => {
+            if (m === 'qr') void startQrRoom();
+          }}
+        />
+      )}
 
       {phase === 'creating' && (
         <View style={styles.center}>
@@ -189,6 +185,10 @@ export default function OfflineHostScreen() {
 
       {phase === 'waiting' && offerPayload && (
         <View style={styles.center}>
+          <Text style={styles.title}>Create Room · QR</Text>
+          <Text style={styles.hint}>
+            Ask the other device to scan this QR (or use Share invite).
+          </Text>
           <View style={styles.qrBox}>
             <QRCode value={offerPayload} size={220} backgroundColor="#fff" color="#000" />
           </View>
@@ -211,9 +211,7 @@ export default function OfflineHostScreen() {
               })
             }
           >
-            <Text style={[styles.primaryBtnText, { color: '#3b82f6' }]}>
-              Scan answer QR
-            </Text>
+            <Text style={[styles.primaryBtnText, { color: '#3b82f6' }]}>Scan answer QR</Text>
           </Pressable>
 
           <Pressable style={styles.cancelBtn} onPress={cancelRoom}>

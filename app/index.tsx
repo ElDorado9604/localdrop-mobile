@@ -88,7 +88,7 @@ export default function HomeScreen() {
   async function chooseFolder() {
     Alert.alert(
       'Save folder',
-      'Pick a location such as Downloads. LocalDrop will create a LocalDrop folder there when possible. Files will appear in the system Files app.',
+      'In the system picker, create a folder named LocalDrop (or pick an existing one). We will save files only into the folder you select — we do not create folders ourselves.',
       [
         { text: 'Cancel', style: 'cancel' },
         {
@@ -96,7 +96,7 @@ export default function HomeScreen() {
           onPress: async () => {
             const ok = await setupPublicSaveFolder();
             if (ok) {
-              Alert.alert('Ready', 'Received files will be saved to your LocalDrop folder.');
+              Alert.alert('Ready', 'Received files will be saved to the folder you selected.');
               await refresh();
             } else {
               Alert.alert('Not set', 'Folder permission was not granted.');
@@ -121,7 +121,7 @@ export default function HomeScreen() {
         <Text style={styles.folderBannerBody}>
           {hasFolder
             ? 'Files appear in the system Files app. No duplicate copies.'
-            : 'Choose a folder before receiving (e.g. Downloads). We create LocalDrop when possible.'}
+            : 'Create or select a folder in the system picker (e.g. LocalDrop under Downloads). Required before receiving.'}
         </Text>
         <Pressable style={styles.folderBtn} onPress={chooseFolder}>
           <Text style={styles.folderBtnText}>
@@ -174,7 +174,7 @@ export default function HomeScreen() {
                 e.preventDefault?.();
                 Alert.alert(
                   'Set save folder first',
-                  'Choose where received files should be stored (visible in Files).',
+                  'Create or select a folder in the system picker so received files appear in Files.',
                   [
                     { text: 'Cancel', style: 'cancel' },
                     { text: 'Choose folder', onPress: () => void chooseFolder() },

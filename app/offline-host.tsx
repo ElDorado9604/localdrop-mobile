@@ -1,5 +1,5 @@
 /**
- * Create Room: NFC / BLE / QR. QR path is scan-only (no share/paste).
+ * Create Room: NFC / Nearby / QR.
  */
 import { useRef, useState, useCallback } from 'react';
 import {
@@ -22,14 +22,22 @@ import {
 } from '../src/lib/offlineSignal';
 import { setOfflineSession, clearOfflineSession } from '../src/lib/offlineSessionStore';
 import { PairingMethodPicker } from '../src/components/PairingMethodPicker';
+import { startNearbyHost } from '../src/lib/nearbyPairing';
 
 const DEVICE_NAME = Platform.OS === 'ios' ? 'iPhone' : 'Android Device';
 
 export default function OfflineHostScreen() {
   const router = useRouter();
   const [phase, setPhase] = useState<
-    'choose-method' | 'creating' | 'waiting' | 'review-join' | 'connecting' | 'failed'
+    | 'choose-method'
+    | 'creating'
+    | 'waiting'
+    | 'nearby-wait'
+    | 'review-join'
+    | 'connecting'
+    | 'failed'
   >('choose-method');
+  const [status, setStatus] = useState('');
   const [roomCode, setRoomCode] = useState('');
   const [offerPayload, setOfferPayload] = useState<string | null>(null);
   const [pendingJoin, setPendingJoin] = useState<{ name: string; sdp: any; code: string } | null>(
@@ -40,6 +48,7 @@ export default function OfflineHostScreen() {
   const codeRef = useRef('');
   const peerNameRef = useRef('peer');
   const startedRef = useRef(false);
+  const nearbyStopRef = useRef<(() => void) | null>(null);
 
   const onAnswerScanned = useCallback((raw: string) => {
     const decoded = decodeRoomPayload(raw);
@@ -68,6 +77,7 @@ export default function OfflineHostScreen() {
         if ((global as any).__localdropOnAnswerScanned === onAnswerScanned) {
           (global as any).__localdropOnAnswerScanned = undefined;
         }
+        nearbyStopRef.current?.();
       };
     }, [onAnswerScanned])
   );
@@ -116,6 +126,78 @@ export default function OfflineHostScreen() {
     }
   }
 
+  async function startNearbyRoom() {
+    if (startedRef.current) return;
+    startedRef.current = true;
+    setPhase('creating');
+    setError(null);
+    setStatus('Creating room…');
+
+    try {
+      const code = generateRoomCode();
+      codeRef.current = code;
+      setRoomCode(code);
+
+      const session = new WebRTCSession();
+      sessionRef.current = session;
+
+      session.setHandlers({
+        onOpen: () => {
+          nearbyStopRef.current?.();
+          setOfflineSession(session, {
+            peerName: peerNameRef.current,
+            roomCode: codeRef.current,
+            isHost: true,
+          });
+          router.replace({ pathname: '/offline-session', params: { role: 'host' } });
+        },
+        onFailed: (reason) => {
+          setError(reason);
+          setPhase('failed');
+        },
+      });
+
+      const local = await session.createOfferForQr();
+      const payload = encodeRoomOffer({
+        code,
+        name: DEVICE_NAME,
+        sdp: local,
+      });
+
+      setPhase('nearby-wait');
+      setStatus('Waiting for nearby device…');
+
+      const result = await startNearbyHost({
+        offerRaw: payload,
+        name: DEVICE_NAME,
+        code,
+        onStatus: setStatus,
+      });
+      nearbyStopRef.current = result.stop;
+
+      const decoded = decodeRoomPayload(result.answerRaw);
+      if (!decoded || decoded.type !== 'answer') {
+        throw new Error('Invalid answer from nearby device');
+      }
+      peerNameRef.current = result.peerName || decoded.name;
+      setPendingJoin({
+        name: peerNameRef.current,
+        sdp: decoded.sdp,
+        code: decoded.code,
+      });
+      setPhase('review-join');
+    } catch (e) {
+      startedRef.current = false;
+      nearbyStopRef.current?.();
+      setError(
+        e instanceof Error
+          ? e.message
+          : 'Nearby pairing failed. Stay on the same Wi‑Fi or hotspot.'
+      );
+      setPhase('failed');
+    }
+  }
+
   async function acceptJoin() {
     if (!pendingJoin || !sessionRef.current) return;
     setPhase('connecting');
@@ -135,18 +217,19 @@ export default function OfflineHostScreen() {
 
   function rejectJoin() {
     setPendingJoin(null);
-    setPhase('waiting');
+    setPhase(offerPayload ? 'waiting' : 'nearby-wait');
     Alert.alert('Rejected', 'Waiting for another device.');
   }
 
   function cancelRoom() {
-    Alert.alert('Cancel room?', 'The QR code will become invalid.', [
+    Alert.alert('Cancel room?', 'Other devices will not be able to join.', [
       { text: 'Keep waiting', style: 'cancel' },
       {
         text: 'Cancel room',
         style: 'destructive',
         onPress: () => {
           clearOfflineSession();
+          nearbyStopRef.current?.();
           sessionRef.current?.close();
           startedRef.current = false;
           router.replace('/offline');
@@ -163,6 +246,7 @@ export default function OfflineHostScreen() {
           subtitle="Both devices need the same Wi‑Fi or hotspot. Choose how to pair."
           onSelect={(m) => {
             if (m === 'qr') void startQrRoom();
+            if (m === 'ble') void startNearbyRoom();
           }}
         />
       )}
@@ -170,7 +254,22 @@ export default function OfflineHostScreen() {
       {phase === 'creating' && (
         <View style={styles.center}>
           <ActivityIndicator color="#3b82f6" size="large" />
-          <Text style={styles.status}>Creating room…</Text>
+          <Text style={styles.status}>{status || 'Creating room…'}</Text>
+        </View>
+      )}
+
+      {phase === 'nearby-wait' && (
+        <View style={styles.center}>
+          <ActivityIndicator color="#3b82f6" size="large" />
+          <Text style={styles.title}>Connect nearby</Text>
+          <Text style={styles.hint}>
+            On the other phone: Join Room → Connect nearby. Stay on the same Wi‑Fi or hotspot.
+          </Text>
+          {!!roomCode && <Text style={styles.codeLabel}>Room {roomCode}</Text>}
+          <Text style={styles.waiting}>{status || 'Broadcasting…'}</Text>
+          <Pressable style={styles.cancelBtn} onPress={cancelRoom}>
+            <Text style={styles.cancelText}>Cancel Room</Text>
+          </Pressable>
         </View>
       )}
 
@@ -183,11 +282,9 @@ export default function OfflineHostScreen() {
           <View style={styles.qrBox}>
             <QRCode value={offerPayload} size={220} backgroundColor="#fff" color="#000" />
           </View>
-
           <Text style={styles.deviceName}>Host: {DEVICE_NAME}</Text>
           {!!roomCode && <Text style={styles.codeLabel}>Room {roomCode}</Text>}
           <Text style={styles.waiting}>Waiting for the other device…</Text>
-
           <Pressable
             style={styles.primaryBtn}
             onPress={() =>
@@ -199,7 +296,6 @@ export default function OfflineHostScreen() {
           >
             <Text style={styles.primaryBtnText}>Scan answer QR</Text>
           </Pressable>
-
           <Pressable style={styles.cancelBtn} onPress={cancelRoom}>
             <Text style={styles.cancelText}>Cancel Room</Text>
           </Pressable>
@@ -249,8 +345,8 @@ const styles = StyleSheet.create({
   },
   codeLabel: { color: '#94a3b8', fontSize: 13, marginBottom: 8 },
   deviceName: { color: '#3b82f6', marginBottom: 4 },
-  waiting: { color: '#fbbf24', fontSize: 13, marginBottom: 20 },
-  status: { color: '#aaa', marginTop: 12 },
+  waiting: { color: '#fbbf24', fontSize: 13, marginBottom: 20, textAlign: 'center' },
+  status: { color: '#aaa', marginTop: 12, textAlign: 'center' },
   primaryBtn: {
     backgroundColor: '#3b82f6',
     borderRadius: 14,

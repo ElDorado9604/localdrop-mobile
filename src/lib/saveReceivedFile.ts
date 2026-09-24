@@ -42,14 +42,12 @@ export function humanPathFromSafUri(uri: string): string {
     const treeMatch = uri.match(/\/tree\/([^?]+)/);
     if (treeMatch) {
       let decoded = decodeURIComponent(treeMatch[1]);
-      // primary:Download/LocalDrop  or  raw:/storage/...
       if (decoded.startsWith('primary:')) {
         return '/storage/emulated/0/' + decoded.slice('primary:'.length);
       }
       if (decoded.startsWith('raw:')) {
         return decoded.slice(4);
       }
-      // SD card: XXXX-XXXX:Folder
       const sd = decoded.match(/^([0-9A-Fa-f-]+):(.+)$/);
       if (sd) {
         return `/storage/${sd[1]}/${sd[2]}`;
@@ -75,7 +73,18 @@ export async function getSaveDirectoryUri(): Promise<string | null> {
 }
 
 export async function getSaveDirectoryLabel(): Promise<string> {
-  const label = await AsyncStorage.getItem(SAVE_LABEL_KEY);
+  let label = await AsyncStorage.getItem(SAVE_LABEL_KEY);
+  const uri = await getSaveDirectoryUri();
+
+  // Upgrade old generic labels from URI when possible
+  if (uri && (!label || label === 'Selected folder' || label === FOLDER_NAME)) {
+    const human = humanPathFromSafUri(uri);
+    if (human && human !== 'Selected folder') {
+      label = human;
+      await AsyncStorage.setItem(SAVE_LABEL_KEY, human).catch(() => {});
+    }
+  }
+
   return label || FOLDER_NAME;
 }
 
@@ -84,10 +93,6 @@ export async function hasSaveDirectory(): Promise<boolean> {
   return !!uri;
 }
 
-/**
- * Ask user to pick (or create) a folder in the system picker.
- * We use that folder as-is — no LocalDrop subfolder is created by the app.
- */
 export async function setupPublicSaveFolder(): Promise<boolean> {
   if (Platform.OS !== 'android') {
     const dir = (FileSystem.documentDirectory || '') + FOLDER_NAME + '/';
@@ -165,8 +170,7 @@ export async function ensureSaveFolderOrPrompt(): Promise<boolean> {
 }
 
 /**
- * Resolve a content:// or file:// path to a local file:// URL that Sharing can open.
- * Copies content URIs into cache temporarily.
+ * Resolve content:// to a file:// cache path so Expo Sharing works.
  */
 export async function resolveShareableUri(
   path: string,
@@ -181,7 +185,6 @@ export async function resolveShareableUri(
     return dest;
   }
 
-  // bare absolute path
   if (path.startsWith('/')) return 'file://' + path;
   return path;
 }
@@ -238,7 +241,6 @@ export async function saveReceivedFile(
       ? sizeHint
       : Math.floor((base64.length * 3) / 4);
 
-  // Prefer human folder path + name, e.g. /storage/emulated/0/Download/LocalDrop/photo.jpg
   const displayPath = `${label}/${name}`;
 
   await addToReceivedIndex({

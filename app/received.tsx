@@ -13,6 +13,7 @@ import {
 import { useFocusEffect } from 'expo-router';
 import * as Sharing from 'expo-sharing';
 import * as FileSystem from 'expo-file-system/legacy';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import {
   listReceivedFiles,
   removeFromReceivedIndex,
@@ -24,6 +25,7 @@ import {
 
 type ViewMode = 'list' | 'grid';
 
+const VIEW_MODE_KEY = 'localdrop_received_view_mode';
 const GRID_GAP = 10;
 const GRID_COLS = 3;
 const GRID_SIZE =
@@ -68,7 +70,15 @@ function fileTypeIcon(item: ReceivedFileRecord): string {
   return 'FILE';
 }
 
-function FileThumb({ item, size }: { item: ReceivedFileRecord; size: number }) {
+function FileThumb({
+  item,
+  size,
+  showVideoBadge,
+}: {
+  item: ReceivedFileRecord;
+  size: number;
+  showVideoBadge?: boolean;
+}) {
   if (isImage(item) && item.path) {
     return (
       <Image
@@ -87,6 +97,11 @@ function FileThumb({ item, size }: { item: ReceivedFileRecord; size: number }) {
       ]}
     >
       <Text style={styles.iconText}>{fileTypeIcon(item)}</Text>
+      {showVideoBadge && isVideo(item) && (
+        <View style={styles.playBadge}>
+          <Text style={styles.playBadgeText}>▶</Text>
+        </View>
+      )}
     </View>
   );
 }
@@ -102,6 +117,12 @@ export default function ReceivedScreen() {
     setFiles(await listReceivedFiles());
     setHasFolder(await hasSaveDirectory());
     setLabel(await getSaveDirectoryLabel());
+    try {
+      const saved = await AsyncStorage.getItem(VIEW_MODE_KEY);
+      if (saved === 'list' || saved === 'grid') setViewMode(saved);
+    } catch {
+      /* */
+    }
   }, []);
 
   useFocusEffect(
@@ -109,6 +130,11 @@ export default function ReceivedScreen() {
       void load();
     }, [load])
   );
+
+  async function changeViewMode(mode: ViewMode) {
+    setViewMode(mode);
+    await AsyncStorage.setItem(VIEW_MODE_KEY, mode).catch(() => {});
+  }
 
   async function onRefresh() {
     setRefreshing(true);
@@ -172,7 +198,9 @@ export default function ReceivedScreen() {
   function renderGridItem({ item }: { item: ReceivedFileRecord }) {
     return (
       <Pressable style={styles.gridItem} onPress={() => openOrShare(item)}>
-        <FileThumb item={item} size={GRID_SIZE} />
+        <View>
+          <FileThumb item={item} size={GRID_SIZE} showVideoBadge />
+        </View>
         <Text style={styles.gridName} numberOfLines={2}>
           {item.name}
         </Text>
@@ -199,7 +227,7 @@ export default function ReceivedScreen() {
         <View style={styles.viewToggle}>
           <Pressable
             style={[styles.toggleBtn, viewMode === 'list' && styles.toggleActive]}
-            onPress={() => setViewMode('list')}
+            onPress={() => void changeViewMode('list')}
           >
             <Text style={[styles.toggleText, viewMode === 'list' && styles.toggleTextActive]}>
               List
@@ -207,7 +235,7 @@ export default function ReceivedScreen() {
           </Pressable>
           <Pressable
             style={[styles.toggleBtn, viewMode === 'grid' && styles.toggleActive]}
-            onPress={() => setViewMode('grid')}
+            onPress={() => void changeViewMode('grid')}
           >
             <Text style={[styles.toggleText, viewMode === 'grid' && styles.toggleTextActive]}>
               Grid
@@ -215,6 +243,10 @@ export default function ReceivedScreen() {
           </Pressable>
         </View>
       </View>
+
+      {files.length > 0 && (
+        <Text style={styles.count}>{files.length} file{files.length === 1 ? '' : 's'}</Text>
+      )}
 
       <FlatList
         key={viewMode}
@@ -275,6 +307,12 @@ const styles = StyleSheet.create({
   toggleActive: { backgroundColor: '#3b82f6' },
   toggleText: { color: '#888', fontSize: 13, fontWeight: '600' },
   toggleTextActive: { color: '#fff' },
+  count: {
+    color: '#64748b',
+    fontSize: 12,
+    paddingHorizontal: 16,
+    marginTop: 10,
+  },
   list: { padding: 16, paddingBottom: 40 },
   empty: { color: '#666', textAlign: 'center', marginTop: 48 },
   row: {
@@ -298,6 +336,18 @@ const styles = StyleSheet.create({
   },
   iconVideo: { backgroundColor: '#1e3a5f' },
   iconText: { color: '#94a3b8', fontWeight: '700', fontSize: 12 },
+  playBadge: {
+    position: 'absolute',
+    bottom: 6,
+    right: 6,
+    backgroundColor: 'rgba(0,0,0,0.65)',
+    borderRadius: 10,
+    width: 20,
+    height: 20,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  playBadgeText: { color: '#fff', fontSize: 9 },
   gridRow: { gap: GRID_GAP },
   gridItem: {
     width: GRID_SIZE,

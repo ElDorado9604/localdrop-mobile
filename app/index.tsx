@@ -7,6 +7,7 @@ import {
   ScrollView,
   Platform,
   Alert,
+  Image,
 } from 'react-native';
 import { Link, useFocusEffect, useRouter } from 'expo-router';
 import {
@@ -25,9 +26,47 @@ function formatBytes(n: number) {
   return `${(n / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+function isImage(item: ReceivedFileRecord): boolean {
+  const m = (item.mime || '').toLowerCase();
+  if (m.startsWith('image/')) return true;
+  return /\.(jpe?g|png|gif|webp|bmp|heic|heif)$/i.test(item.name);
+}
+
+function isVideo(item: ReceivedFileRecord): boolean {
+  const m = (item.mime || '').toLowerCase();
+  if (m.startsWith('video/')) return true;
+  return /\.(mp4|mov|webm|mkv|avi|3gp)$/i.test(item.name);
+}
+
+function typeLabel(item: ReceivedFileRecord): string {
+  if (isVideo(item)) return '▶';
+  const n = item.name.toLowerCase();
+  if (n.endsWith('.pdf')) return 'PDF';
+  if (n.endsWith('.zip') || n.endsWith('.rar')) return 'ZIP';
+  return 'FILE';
+}
+
+function MiniThumb({ item }: { item: ReceivedFileRecord }) {
+  if (isImage(item) && item.path) {
+    return (
+      <Image
+        source={{ uri: item.path }}
+        style={styles.miniThumb}
+        resizeMode="cover"
+      />
+    );
+  }
+  return (
+    <View style={[styles.miniIcon, isVideo(item) && styles.miniIconVideo]}>
+      <Text style={styles.miniIconText}>{typeLabel(item)}</Text>
+    </View>
+  );
+}
+
 export default function HomeScreen() {
   const [mode, setMode] = useState<Mode>('online');
   const [recent, setRecent] = useState<ReceivedFileRecord[]>([]);
+  const [totalCount, setTotalCount] = useState(0);
   const [hasFolder, setHasFolder] = useState(false);
   const [folderLabel, setFolderLabel] = useState('LocalDrop');
   const router = useRouter();
@@ -36,6 +75,7 @@ export default function HomeScreen() {
     setHasFolder(await hasSaveDirectory());
     setFolderLabel(await getSaveDirectoryLabel());
     const list = await listReceivedFiles();
+    setTotalCount(list.length);
     setRecent(list.slice(0, 5));
   }, []);
 
@@ -74,7 +114,6 @@ export default function HomeScreen() {
         Fast peer-to-peer file transfer on the same network
       </Text>
 
-      {/* Folder setup banner */}
       <View style={[styles.folderBanner, !hasFolder && styles.folderBannerWarn]}>
         <Text style={styles.folderBannerTitle}>
           {hasFolder ? `Saving to: ${folderLabel}` : 'Save folder not set'}
@@ -153,7 +192,9 @@ export default function HomeScreen() {
 
       <View style={styles.receivedSection}>
         <View style={styles.receivedHeader}>
-          <Text style={styles.receivedTitle}>Files Received</Text>
+          <Text style={styles.receivedTitle}>
+            Files Received{totalCount > 0 ? ` (${totalCount})` : ''}
+          </Text>
           <Pressable onPress={() => router.push('/received')}>
             <Text style={styles.seeAll}>See all</Text>
           </Pressable>
@@ -168,7 +209,8 @@ export default function HomeScreen() {
               style={styles.receivedRow}
               onPress={() => router.push('/received')}
             >
-              <View style={{ flex: 1 }}>
+              <MiniThumb item={f} />
+              <View style={{ flex: 1, marginLeft: 12 }}>
                 <Text style={styles.receivedName} numberOfLines={1}>
                   {f.name}
                 </Text>
@@ -290,10 +332,28 @@ const styles = StyleSheet.create({
     paddingVertical: 16,
   },
   receivedRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
     paddingVertical: 10,
     borderTopWidth: 1,
     borderTopColor: '#222',
   },
   receivedName: { color: '#fff', fontSize: 14 },
   receivedMeta: { color: '#888', fontSize: 12, marginTop: 2 },
+  miniThumb: {
+    width: 40,
+    height: 40,
+    borderRadius: 8,
+    backgroundColor: '#222',
+  },
+  miniIcon: {
+    width: 40,
+    height: 40,
+    borderRadius: 8,
+    backgroundColor: '#2a2a2a',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  miniIconVideo: { backgroundColor: '#1e3a5f' },
+  miniIconText: { color: '#94a3b8', fontSize: 10, fontWeight: '700' },
 });

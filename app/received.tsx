@@ -16,6 +16,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import {
   listReceivedFiles,
   removeFromReceivedIndex,
+  removeManyFromReceivedIndex,
   setupPublicSaveFolder,
   hasSaveDirectory,
   getSaveDirectoryLabel,
@@ -106,12 +107,22 @@ function FileThumb({
   );
 }
 
+function CheckBox({ checked }: { checked: boolean }) {
+  return (
+    <View style={[styles.check, checked && styles.checkOn]}>
+      {checked ? <Text style={styles.checkMark}>✓</Text> : null}
+    </View>
+  );
+}
+
 export default function ReceivedScreen() {
   const [files, setFiles] = useState<ReceivedFileRecord[]>([]);
   const [refreshing, setRefreshing] = useState(false);
   const [hasFolder, setHasFolder] = useState(false);
   const [label, setLabel] = useState('LocalDrop');
   const [viewMode, setViewMode] = useState<ViewMode>('list');
+  const [selectMode, setSelectMode] = useState(false);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
 
   const load = useCallback(async () => {
     setFiles(await listReceivedFiles());
@@ -142,13 +153,54 @@ export default function ReceivedScreen() {
     setRefreshing(false);
   }
 
+  function exitSelectMode() {
+    setSelectMode(false);
+    setSelected(new Set());
+  }
+
+  function toggleSelect(id: string) {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  function selectAll() {
+    if (selected.size === files.length) {
+      setSelected(new Set());
+    } else {
+      setSelected(new Set(files.map((f) => f.id)));
+    }
+  }
+
+  function clearSelected() {
+    if (selected.size === 0) return;
+    Alert.alert(
+      'Clear from app list?',
+      `${selected.size} file(s) will be hidden in LocalDrop. Files stay in your folder (system Files app).`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Clear selected',
+          style: 'destructive',
+          onPress: async () => {
+            await removeManyFromReceivedIndex([...selected]);
+            exitSelectMode();
+            await load();
+          },
+        },
+      ]
+    );
+  }
+
   async function openOrShare(item: ReceivedFileRecord) {
     try {
       if (!(await Sharing.isAvailableAsync())) {
         Alert.alert('Saved at', item.displayPath);
         return;
       }
-      // content:// is not supported by ExpoSharing — copy to cache first
       const shareUri = await resolveShareableUri(item.path, item.name);
       await Sharing.shareAsync(shareUri, {
         mimeType: item.mime || undefined,
@@ -166,6 +218,14 @@ export default function ReceivedScreen() {
     }
   }
 
+  function onItemPress(item: ReceivedFileRecord) {
+    if (selectMode) {
+      toggleSelect(item.id);
+      return;
+    }
+    void openOrShare(item);
+  }
+
   async function setFolder() {
     const ok = await setupPublicSaveFolder();
     if (ok) {
@@ -175,8 +235,19 @@ export default function ReceivedScreen() {
   }
 
   function renderListItem({ item }: { item: ReceivedFileRecord }) {
+    const checked = selected.has(item.id);
     return (
-      <Pressable style={styles.row} onPress={() => openOrShare(item)}>
+      <Pressable
+        style={[styles.row, selectMode && checked && styles.rowSelected]}
+        onPress={() => onItemPress(item)}
+        onLongPress={() => {
+          if (!selectMode) {
+            setSelectMode(true);
+            setSelected(new Set([item.id]));
+          }
+        }}
+      >
+        {selectMode && <CheckBox checked={checked} />}
         <FileThumb item={item} size={52} />
         <View style={styles.rowBody}>
           <Text style={styles.name} numberOfLines={1}>
@@ -189,16 +260,31 @@ export default function ReceivedScreen() {
             {item.displayPath}
           </Text>
         </View>
-        <Text style={styles.open}>Open</Text>
+        {!selectMode && <Text style={styles.open}>Open</Text>}
       </Pressable>
     );
   }
 
   function renderGridItem({ item }: { item: ReceivedFileRecord }) {
+    const checked = selected.has(item.id);
     return (
-      <Pressable style={styles.gridItem} onPress={() => openOrShare(item)}>
+      <Pressable
+        style={[styles.gridItem, selectMode && checked && styles.gridSelected]}
+        onPress={() => onItemPress(item)}
+        onLongPress={() => {
+          if (!selectMode) {
+            setSelectMode(true);
+            setSelected(new Set([item.id]));
+          }
+        }}
+      >
         <View>
           <FileThumb item={item} size={GRID_SIZE} showVideoBadge />
+          {selectMode && (
+            <View style={styles.gridCheck}>
+              <CheckBox checked={checked} />
+            </View>
+          )}
         </View>
         <Text style={styles.gridName} numberOfLines={2}>
           {item.name}
@@ -207,6 +293,8 @@ export default function ReceivedScreen() {
       </Pressable>
     );
   }
+
+  const allSelected = files.length > 0 && selected.size === files.length;
 
   return (
     <View style={styles.container}>
@@ -243,14 +331,50 @@ export default function ReceivedScreen() {
         </View>
       </View>
 
+      {/* Select toolbar */}
+      <View style={styles.selectBar}>
+        {!selectMode ? (
+          <Pressable
+            style={styles.selectBtn}
+            onPress={() => setSelectMode(true)}
+            disabled={files.length === 0}
+          >
+            <Text style={[styles.selectBtnText, files.length === 0 && styles.disabled]}>
+              Select
+            </Text>
+          </Pressable>
+        ) : (
+          <>
+            <Pressable style={styles.selectBtn} onPress={selectAll}>
+              <Text style={styles.selectBtnText}>
+                {allSelected ? 'Deselect all' : 'Select all'}
+              </Text>
+            </Pressable>
+            <Pressable
+              style={[styles.clearBtn, selected.size === 0 && styles.clearBtnDisabled]}
+              onPress={clearSelected}
+              disabled={selected.size === 0}
+            >
+              <Text style={styles.clearBtnText}>
+                Clear selected{selected.size > 0 ? ` (${selected.size})` : ''}
+              </Text>
+            </Pressable>
+            <Pressable style={styles.selectBtn} onPress={exitSelectMode}>
+              <Text style={styles.selectBtnText}>Done</Text>
+            </Pressable>
+          </>
+        )}
+      </View>
+
       {files.length > 0 && (
         <Text style={styles.count}>
           {files.length} file{files.length === 1 ? '' : 's'}
+          {selectMode && selected.size > 0 ? ` · ${selected.size} selected` : ''}
         </Text>
       )}
 
       <FlatList
-        key={viewMode}
+        key={viewMode + (selectMode ? '-s' : '')}
         data={files}
         keyExtractor={(item) => item.id}
         numColumns={viewMode === 'grid' ? GRID_COLS : 1}
@@ -308,6 +432,33 @@ const styles = StyleSheet.create({
   toggleActive: { backgroundColor: '#3b82f6' },
   toggleText: { color: '#888', fontSize: 13, fontWeight: '600' },
   toggleTextActive: { color: '#fff' },
+  selectBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flexWrap: 'wrap',
+    gap: 8,
+    paddingHorizontal: 16,
+    marginTop: 12,
+  },
+  selectBtn: {
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#333',
+  },
+  selectBtnText: { color: '#3b82f6', fontSize: 13, fontWeight: '600' },
+  disabled: { color: '#555' },
+  clearBtn: {
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderRadius: 10,
+    backgroundColor: '#3f1d1d',
+    borderWidth: 1,
+    borderColor: '#7f1d1d',
+  },
+  clearBtnDisabled: { opacity: 0.4 },
+  clearBtnText: { color: '#f87171', fontSize: 13, fontWeight: '600' },
   count: {
     color: '#64748b',
     fontSize: 12,
@@ -324,11 +475,31 @@ const styles = StyleSheet.create({
     padding: 12,
     marginBottom: 10,
   },
+  rowSelected: {
+    borderWidth: 1,
+    borderColor: '#3b82f6',
+    backgroundColor: '#152033',
+  },
   rowBody: { flex: 1, marginLeft: 12 },
   name: { color: '#fff', fontWeight: '600' },
   meta: { color: '#888', fontSize: 12, marginTop: 4 },
   path: { color: '#64748b', fontSize: 11, marginTop: 2 },
   open: { color: '#3b82f6', fontWeight: '600', marginLeft: 8 },
+  check: {
+    width: 24,
+    height: 24,
+    borderRadius: 6,
+    borderWidth: 2,
+    borderColor: '#555',
+    marginRight: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  checkOn: {
+    backgroundColor: '#3b82f6',
+    borderColor: '#3b82f6',
+  },
+  checkMark: { color: '#fff', fontSize: 14, fontWeight: '700' },
   iconBox: {
     borderRadius: 8,
     backgroundColor: '#2a2a2a',
@@ -353,6 +524,12 @@ const styles = StyleSheet.create({
   gridItem: {
     width: GRID_SIZE,
     marginBottom: GRID_GAP,
+  },
+  gridSelected: { opacity: 0.95 },
+  gridCheck: {
+    position: 'absolute',
+    top: 6,
+    left: 6,
   },
   gridName: {
     color: '#fff',

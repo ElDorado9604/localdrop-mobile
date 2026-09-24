@@ -85,7 +85,7 @@ export default function ReceiveScreen() {
     return new Promise((resolve) => {
       Alert.alert(
         'Set save folder',
-        'Pick a location such as Downloads. LocalDrop will create a LocalDrop folder when possible. Do this before connecting so the transfer stays stable.',
+        'In the system picker, create a folder (e.g. LocalDrop) or select an existing one. Do this before connecting so the transfer stays stable.',
         [
           { text: 'Cancel', style: 'cancel', onPress: () => resolve(false) },
           {

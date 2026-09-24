@@ -1,6 +1,6 @@
 /**
- * Persistent offline session: send / receive / send more / swap direction.
- * Saves received files to the public LocalDrop folder (same as online).
+ * Connected offline room: send / receive / send more / bidirectional.
+ * Saves to public folder. Room stays open until Leave Room.
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
@@ -18,6 +18,7 @@ import * as FileSystem from 'expo-file-system/legacy';
 import {
   getOfflineSession,
   getOfflinePeerName,
+  getOfflineRoomCode,
   clearOfflineSession,
 } from '../src/lib/offlineSessionStore';
 import {
@@ -50,6 +51,7 @@ type QueuedFile = {
 export default function OfflineSessionScreen() {
   const router = useRouter();
   const peerName = getOfflinePeerName();
+  const roomCode = getOfflineRoomCode();
 
   const [phase, setPhase] = useState<
     'ready' | 'offering' | 'transferring' | 'completed' | 'failed'
@@ -68,6 +70,7 @@ export default function OfflineSessionScreen() {
   const queueRef = useRef<QueuedFile[]>([]);
   const startTimeRef = useRef(0);
   const cancelledRef = useRef(false);
+  const phaseRef = useRef(phase);
   const incomingRef = useRef<
     Map<string, { meta: FileMeta; chunks: ArrayBuffer[]; received: number; totalChunks: number }>
   >(new Map());
@@ -75,6 +78,9 @@ export default function OfflineSessionScreen() {
   useEffect(() => {
     queueRef.current = queue;
   }, [queue]);
+  useEffect(() => {
+    phaseRef.current = phase;
+  }, [phase]);
 
   const updateFile = useCallback((id: string, patch: Partial<QueuedFile>) => {
     setQueue((prev) => {
@@ -87,7 +93,7 @@ export default function OfflineSessionScreen() {
   const runSend = useCallback(async () => {
     const session = getOfflineSession();
     if (!session?.isChannelOpen()) {
-      setError('Connection lost');
+      setError('Connection lost. Reconnect both devices to the same Wi‑Fi or hotspot.');
       setPhase('failed');
       return;
     }
@@ -144,7 +150,7 @@ export default function OfflineSessionScreen() {
         session.sendJson({ type: 'file-complete', fileId: item.id });
         updateFile(item.id, { status: 'completed', progress: 100 });
       } catch (e) {
-        const msg = e instanceof Error ? e.message : 'Send failed';
+        const msg = e instanceof Error ? e.message : 'File transfer failed. Please try again.';
         updateFile(item.id, { status: 'error', error: msg });
         session.sendJson({ type: 'transfer-error', message: msg });
         setPhase('failed');
@@ -215,7 +221,7 @@ export default function OfflineSessionScreen() {
         void runSend();
       } else if (msg.type === 'transfer-rejected') {
         setPhase('ready');
-        setError('Peer declined the transfer.');
+        setError('File transfer was declined.');
       } else if (msg.type === 'file-start') {
         const totalChunks = Math.ceil(msg.size / CHUNK_SIZE) || 1;
         incomingRef.current.set(msg.fileId, {
@@ -305,7 +311,7 @@ export default function OfflineSessionScreen() {
   useEffect(() => {
     const session = getOfflineSession();
     if (!session || !session.isChannelOpen()) {
-      setError('No offline session. Pair devices first.');
+      setError('This room is no longer active. Ask the other device to create a new room.');
       setPhase('failed');
       return;
     }
@@ -314,7 +320,7 @@ export default function OfflineSessionScreen() {
     session.setHandlers({
       onMessage: (data) => void handleProtocol(data),
       onClose: () => {
-        setError('Connection closed');
+        setError('The other device has left the room.');
         setPhase('failed');
       },
       onFailed: (reason) => {
@@ -327,7 +333,7 @@ export default function OfflineSessionScreen() {
   async function pickAndOffer() {
     const session = getOfflineSession();
     if (!session?.isChannelOpen()) {
-      Alert.alert('Not connected', 'Pair devices again');
+      Alert.alert('Not connected', 'Create or join a room again');
       return;
     }
 
@@ -404,9 +410,31 @@ export default function OfflineSessionScreen() {
     setPhase('ready');
   }
 
-  function endSession() {
-    clearOfflineSession();
-    router.replace('/');
+  function leaveRoom() {
+    const transferring = phaseRef.current === 'transferring';
+    Alert.alert(
+      'Leave this room?',
+      transferring
+        ? 'A file transfer is in progress. Leaving will cancel the transfer. The connection will be closed.'
+        : 'The current connection will be closed. QR code and passcode will become invalid.',
+      [
+        { text: 'Stay', style: 'cancel' },
+        {
+          text: 'Leave Room',
+          style: 'destructive',
+          onPress: () => {
+            cancelledRef.current = true;
+            try {
+              getOfflineSession()?.sendJson({ type: 'transfer-cancelled' });
+            } catch {
+              /* */
+            }
+            clearOfflineSession();
+            router.replace('/offline');
+          },
+        },
+      ]
+    );
   }
 
   const progress =
@@ -414,15 +442,16 @@ export default function OfflineSessionScreen() {
 
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.content}>
-      <Text style={styles.title}>Offline session</Text>
+      <Text style={styles.title}>Connected</Text>
       <Text style={styles.peer}>Peer: {peerName}</Text>
+      {!!roomCode && <Text style={styles.code}>Room {roomCode}</Text>}
       <Text style={styles.wifiHint}>Same Wi‑Fi / hotspot · no internet needed</Text>
 
       {phase === 'ready' && (
         <View style={styles.center}>
-          <Text style={styles.ready}>Connected — ready</Text>
+          <Text style={styles.ready}>Ready — send or receive files</Text>
           <Pressable style={styles.primaryBtn} onPress={pickAndOffer}>
-            <Text style={styles.primaryBtnText}>Send files</Text>
+            <Text style={styles.primaryBtnText}>Send Files</Text>
           </Pressable>
           <Text style={styles.hint}>Or wait — the other device can send to you</Text>
         </View>
@@ -463,17 +492,19 @@ export default function OfflineSessionScreen() {
 
       {phase === 'completed' && (
         <View style={styles.center}>
-          <Text style={styles.done}>Transfer complete</Text>
+          <Text style={styles.done}>Files transferred successfully</Text>
+          <Text style={styles.hint}>Send or receive more files</Text>
           <Pressable style={styles.primaryBtn} onPress={resetForMore}>
-            <Text style={styles.primaryBtnText}>Send more files</Text>
+            <Text style={styles.primaryBtnText}>Send More Files</Text>
           </Pressable>
           <Pressable
-            style={[styles.primaryBtn, { marginTop: 12, backgroundColor: '#1a1a1a', borderWidth: 1, borderColor: '#3b82f6' }]}
+            style={[styles.primaryBtn, styles.outlineBtn]}
             onPress={() => router.push('/received')}
           >
-            <Text style={[styles.primaryBtnText, { color: '#3b82f6' }]}>View Files Received</Text>
+            <Text style={[styles.primaryBtnText, { color: '#3b82f6' }]}>
+              View Received Files
+            </Text>
           </Pressable>
-          <Text style={styles.hint}>Or wait for the other side to send</Text>
         </View>
       )}
 
@@ -482,16 +513,16 @@ export default function OfflineSessionScreen() {
           {queue.map((f) => (
             <View key={f.id} style={styles.fileRow}>
               <View style={{ flex: 1 }}>
-                <Text style={styles.fileName} numberOfLines={1}>{f.name}</Text>
+                <Text style={styles.fileName} numberOfLines={1}>
+                  {f.name}
+                </Text>
                 <Text style={styles.fileMeta}>
                   {f.status === 'completed'
                     ? `Saved · ${f.displayPath || f.name}`
                     : `${f.status} · ${f.progress}% · ${formatBytes(f.size)}`}
                 </Text>
               </View>
-              {f.status === 'completed' && (
-                <Text style={styles.savedBadge}>Saved</Text>
-              )}
+              {f.status === 'completed' && <Text style={styles.savedBadge}>Saved</Text>}
             </View>
           ))}
         </View>
@@ -499,8 +530,8 @@ export default function OfflineSessionScreen() {
 
       {error && <Text style={styles.error}>{error}</Text>}
 
-      <Pressable style={styles.endBtn} onPress={endSession}>
-        <Text style={styles.endText}>End session</Text>
+      <Pressable style={styles.endBtn} onPress={leaveRoom}>
+        <Text style={styles.endText}>Leave Room</Text>
       </Pressable>
     </ScrollView>
   );
@@ -509,8 +540,9 @@ export default function OfflineSessionScreen() {
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#0f0f0f' },
   content: { padding: 24, paddingBottom: 48 },
-  title: { color: '#fff', fontSize: 22, fontWeight: '700', textAlign: 'center' },
-  peer: { color: '#3b82f6', textAlign: 'center', marginBottom: 8 },
+  title: { color: '#22c55e', fontSize: 22, fontWeight: '700', textAlign: 'center' },
+  peer: { color: '#3b82f6', textAlign: 'center', marginBottom: 4 },
+  code: { color: '#94a3b8', textAlign: 'center', marginBottom: 8 },
   wifiHint: { color: '#fbbf24', fontSize: 12, textAlign: 'center', marginBottom: 20 },
   center: { alignItems: 'center', marginVertical: 24 },
   ready: { color: '#22c55e', fontWeight: '600', marginBottom: 16 },
@@ -522,6 +554,12 @@ const styles = StyleSheet.create({
     paddingHorizontal: 32,
     alignItems: 'center',
     minWidth: 200,
+    marginTop: 8,
+  },
+  outlineBtn: {
+    backgroundColor: '#1a1a1a',
+    borderWidth: 1,
+    borderColor: '#3b82f6',
   },
   primaryBtnText: { color: '#fff', fontWeight: '600' },
   offerBox: {
@@ -573,7 +611,7 @@ const styles = StyleSheet.create({
   fileName: { color: '#fff' },
   fileMeta: { color: '#888', fontSize: 12, marginTop: 2 },
   savedBadge: { color: '#22c55e', fontWeight: '700', fontSize: 12 },
-  done: { color: '#22c55e', fontSize: 18, fontWeight: '700', marginBottom: 16 },
+  done: { color: '#22c55e', fontSize: 18, fontWeight: '700', marginBottom: 8 },
   error: { color: '#ef4444', textAlign: 'center', marginTop: 12 },
   endBtn: {
     marginTop: 32,

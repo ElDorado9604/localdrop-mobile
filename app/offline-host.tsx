@@ -1,7 +1,7 @@
 /**
- * Create Room: pick pairing method (NFC / BLE / QR), then run that transport.
+ * Create Room: NFC / BLE / QR. QR path is scan-only (no share/paste).
  */
-import { useEffect, useRef, useState, useCallback } from 'react';
+import { useRef, useState, useCallback } from 'react';
 import {
   View,
   Text,
@@ -10,7 +10,6 @@ import {
   ActivityIndicator,
   ScrollView,
   Alert,
-  Share,
   Platform,
 } from 'react-native';
 import { useRouter, useFocusEffect } from 'expo-router';
@@ -49,7 +48,7 @@ export default function OfflineHostScreen() {
       return;
     }
     if (codeRef.current && decoded.code && decoded.code !== codeRef.current) {
-      Alert.alert('Invalid room passcode', 'This answer is for a different room.');
+      Alert.alert('Wrong room', 'This answer is for a different room.');
       return;
     }
     peerNameRef.current = decoded.name;
@@ -137,19 +136,11 @@ export default function OfflineHostScreen() {
   function rejectJoin() {
     setPendingJoin(null);
     setPhase('waiting');
-    Alert.alert('Rejected', 'Join request was rejected. Waiting for another device.');
-  }
-
-  async function shareInvite() {
-    if (!offerPayload) return;
-    await Share.share({
-      message: offerPayload,
-      title: `LocalDrop room ${roomCode}`,
-    });
+    Alert.alert('Rejected', 'Waiting for another device.');
   }
 
   function cancelRoom() {
-    Alert.alert('Cancel room?', 'The QR code and passcode will become invalid.', [
+    Alert.alert('Cancel room?', 'The QR code will become invalid.', [
       { text: 'Keep waiting', style: 'cancel' },
       {
         text: 'Cancel room',
@@ -185,25 +176,20 @@ export default function OfflineHostScreen() {
 
       {phase === 'waiting' && offerPayload && (
         <View style={styles.center}>
-          <Text style={styles.title}>Create Room · QR</Text>
+          <Text style={styles.title}>Show this QR</Text>
           <Text style={styles.hint}>
-            Ask the other device to scan this QR (or use Share invite).
+            Ask the other phone to scan this code, then scan their answer QR.
           </Text>
           <View style={styles.qrBox}>
             <QRCode value={offerPayload} size={220} backgroundColor="#fff" color="#000" />
           </View>
 
-          <Text style={styles.codeLabel}>Room passcode</Text>
-          <Text style={styles.code}>{roomCode}</Text>
           <Text style={styles.deviceName}>Host: {DEVICE_NAME}</Text>
-          <Text style={styles.waiting}>Waiting for another device to join…</Text>
-
-          <Pressable style={styles.primaryBtn} onPress={shareInvite}>
-            <Text style={styles.primaryBtnText}>Share invite</Text>
-          </Pressable>
+          {!!roomCode && <Text style={styles.codeLabel}>Room {roomCode}</Text>}
+          <Text style={styles.waiting}>Waiting for the other device…</Text>
 
           <Pressable
-            style={[styles.primaryBtn, styles.outlineBtn]}
+            style={styles.primaryBtn}
             onPress={() =>
               router.push({
                 pathname: '/offline-scan',
@@ -211,7 +197,7 @@ export default function OfflineHostScreen() {
               })
             }
           >
-            <Text style={[styles.primaryBtnText, { color: '#3b82f6' }]}>Scan answer QR</Text>
+            <Text style={styles.primaryBtnText}>Scan answer QR</Text>
           </Pressable>
 
           <Pressable style={styles.cancelBtn} onPress={cancelRoom}>
@@ -224,7 +210,7 @@ export default function OfflineHostScreen() {
         <View style={styles.reviewBox}>
           <Text style={styles.reviewTitle}>Join request</Text>
           <Text style={styles.reviewBody}>
-            <Text style={{ fontWeight: '700' }}>{pendingJoin.name}</Text> wants to join this room.
+            <Text style={{ fontWeight: '700' }}>{pendingJoin.name}</Text> wants to join.
           </Text>
           <View style={styles.row}>
             <Pressable style={styles.acceptBtn} onPress={acceptJoin}>
@@ -261,15 +247,8 @@ const styles = StyleSheet.create({
     borderRadius: 16,
     marginBottom: 20,
   },
-  codeLabel: { color: '#94a3b8', fontSize: 13 },
-  code: {
-    color: '#fff',
-    fontSize: 36,
-    fontWeight: '700',
-    letterSpacing: 6,
-    marginVertical: 8,
-  },
-  deviceName: { color: '#3b82f6', marginBottom: 8 },
+  codeLabel: { color: '#94a3b8', fontSize: 13, marginBottom: 8 },
+  deviceName: { color: '#3b82f6', marginBottom: 4 },
   waiting: { color: '#fbbf24', fontSize: 13, marginBottom: 20 },
   status: { color: '#aaa', marginTop: 12 },
   primaryBtn: {
@@ -280,11 +259,6 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginBottom: 10,
     minWidth: 220,
-  },
-  outlineBtn: {
-    backgroundColor: 'transparent',
-    borderWidth: 1,
-    borderColor: '#3b82f6',
   },
   primaryBtnText: { color: '#fff', fontWeight: '600' },
   cancelBtn: { marginTop: 16 },

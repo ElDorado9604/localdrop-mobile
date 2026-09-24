@@ -1,5 +1,5 @@
 /**
- * Camera QR scanner — Android-safe remount + onCameraReady to avoid black preview.
+ * Camera QR scanner — scan only (no share/paste).
  */
 import { useState, useCallback } from 'react';
 import {
@@ -28,7 +28,6 @@ export default function OfflineScanScreen() {
 
   const expectType = mode === 'answer' ? 'answer' : 'offer';
 
-  // Remount camera every time this screen is focused (fixes Android black screen)
   useFocusEffect(
     useCallback(() => {
       setScanned(false);
@@ -58,9 +57,6 @@ export default function OfflineScanScreen() {
         <Pressable onPress={() => router.back()}>
           <Text style={styles.link}>Back</Text>
         </Pressable>
-        <Text style={[styles.tip, { marginTop: 24 }]}>
-          Or go back and use Share invite / Paste invite instead of the camera.
-        </Text>
       </View>
     );
   }
@@ -136,28 +132,14 @@ export default function OfflineScanScreen() {
         <Pressable style={styles.btn} onPress={() => router.back()}>
           <Text style={styles.btnText}>Cancel</Text>
         </Pressable>
-        <Pressable
-          style={styles.linkBtn}
-          onPress={() => {
-            router.back();
-          }}
-        >
-          <Text style={styles.link}>Use Share / Paste invite instead</Text>
-        </Pressable>
       </View>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#000',
-  },
-  camera: {
-    flex: 1,
-    width: '100%',
-  },
+  container: { flex: 1, backgroundColor: '#000' },
+  camera: { flex: 1, width: '100%' },
   loadingOverlay: {
     ...StyleSheet.absoluteFillObject,
     backgroundColor: '#111',
@@ -180,23 +162,11 @@ const styles = StyleSheet.create({
     marginTop: 12,
   },
   btnText: { color: '#fff', fontWeight: '600' },
-  link: { color: '#93c5fd', marginTop: 8 },
-  linkBtn: { marginTop: 8 },
-  mask: {
-    ...StyleSheet.absoluteFillObject,
-  },
-  maskRow: {
-    flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.55)',
-  },
-  maskMid: {
-    height: FRAME,
-    flexDirection: 'row',
-  },
-  maskSide: {
-    flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.55)',
-  },
+  link: { color: '#93c5fd', marginTop: 16 },
+  mask: { ...StyleSheet.absoluteFillObject },
+  maskRow: { flex: 1, backgroundColor: 'rgba(0,0,0,0.55)' },
+  maskMid: { height: FRAME, flexDirection: 'row' },
+  maskSide: { flex: 1, backgroundColor: 'rgba(0,0,0,0.55)' },
   frame: {
     width: FRAME,
     height: FRAME,

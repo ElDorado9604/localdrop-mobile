@@ -2,11 +2,15 @@
  * Public save folder only (system Files app).
  * User picks or creates the folder themselves — we never create a subfolder.
  * No second copy in app-private Documents.
+ *
+ * Large files (>~50 MB) must use the streaming writer (createStreamingWriter)
+ * so we never hold the full file in JS memory.
  */
 
 import { Platform } from 'react-native';
 import * as FileSystem from 'expo-file-system/legacy';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { createReceivedFileWriter, type ReceivedFileWriter } from './fileStream';
 
 const SAVE_DIR_KEY = 'localdrop_public_save_dir_uri';
 const SAVE_LABEL_KEY = 'localdrop_public_save_label';
@@ -188,6 +192,10 @@ export async function resolveShareableUri(
   return path;
 }
 
+/**
+ * Legacy path — loads full Base64 into memory.
+ * Only safe for small files (< ~80 MB).
+ */
 export async function saveReceivedFile(
   fileName: string,
   base64: string,
@@ -253,6 +261,44 @@ export async function saveReceivedFile(
   });
 
   return { path: finalPath, displayPath, id };
+}
+
+/**
+ * Preferred path for any file that may be large.
+ * Streams chunks to a temp file, then moves into the public LocalDrop folder.
+ * Memory usage stays constant.
+ */
+export async function createStreamingWriter(
+  fileName: string,
+  mime?: string,
+  sizeHint?: number
+): Promise<ReceivedFileWriter> {
+  const writer = await createReceivedFileWriter(
+    fileName,
+    mime,
+    sizeHint ?? 0,
+    saveReceivedFile,
+    getSaveDirectoryUri,
+    getSaveDirectoryLabel
+  );
+
+  // Wrap finish so we also add the index entry
+  const originalFinish = writer.finish.bind(writer);
+  writer.finish = async () => {
+    const result = await originalFinish();
+    await addToReceivedIndex({
+      id: result.id,
+      name: safeFileName(fileName),
+      path: result.path,
+      displayPath: result.displayPath,
+      size: sizeHint ?? 0,
+      mime: mime || 'application/octet-stream',
+      receivedAt: Date.now(),
+    });
+    return result;
+  };
+
+  return writer;
 }
 
 export async function initLocalDropStorage(): Promise<void> {}

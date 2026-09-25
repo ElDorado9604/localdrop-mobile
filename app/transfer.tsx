@@ -8,7 +8,6 @@ import {
   ActivityIndicator,
 } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import * as FileSystem from 'expo-file-system/legacy';
 import {
   getSocket,
   sendSignal,
@@ -23,8 +22,16 @@ import {
   FileMeta,
   formatBytes,
   formatSpeed,
+  MAX_FILE_SIZE,
 } from '../src/lib/transferProtocol';
-import { saveReceivedFile, ensureAppLocalDropDir } from '../src/lib/saveReceivedFile';
+import {
+  createStreamingWriter,
+  ensureAppLocalDropDir,
+  hasSaveDirectory,
+  setupPublicSaveFolder,
+} from '../src/lib/saveReceivedFile';
+import { streamFileChunks } from '../src/lib/fileStream';
+import type { ReceivedFileWriter } from '../src/lib/fileStream';
 
 type QueuedFile = {
   id: string;
@@ -71,15 +78,22 @@ export default function TransferScreen() {
   const queueRef = useRef<QueuedFile[]>([]);
   const offerSentRef = useRef(false);
   const cancelledRef = useRef(false);
-  const incomingRef = useRef<
-    Map<string, { meta: FileMeta; chunks: ArrayBuffer[]; received: number; totalChunks: number }>
+  const writersRef = useRef<
+    Map<
+      string,
+      {
+        meta: FileMeta;
+        writer: ReceivedFileWriter;
+        received: number;
+        totalChunks: number;
+      }
+    >
   >(new Map());
 
   useEffect(() => {
     queueRef.current = queue;
   }, [queue]);
 
-  // Ensure LocalDrop exists before any receive
   useEffect(() => {
     void ensureAppLocalDropDir();
   }, []);
@@ -120,6 +134,14 @@ export default function TransferScreen() {
       return;
     }
 
+    for (const f of pending) {
+      if (f.size > MAX_FILE_SIZE) {
+        setError(`File "${f.name}" exceeds the 200 GB limit.`);
+        setPhase('failed');
+        return;
+      }
+    }
+
     setPhase('transferring');
     emitTransferStarted();
     startTimeRef.current = Date.now();
@@ -144,26 +166,26 @@ export default function TransferScreen() {
       });
 
       try {
-        const base64 = await FileSystem.readAsStringAsync(item.uri!, {
-          encoding: FileSystem.EncodingType.Base64,
-        });
-        const binary = atob(base64);
-        const totalChunks = Math.ceil(binary.length / CHUNK_SIZE) || 1;
+        const totalChunks = Math.ceil(item.size / CHUNK_SIZE) || 1;
         let sent = 0;
 
-        for (let offset = 0; offset < binary.length; offset += CHUNK_SIZE) {
-          if (cancelledRef.current) break;
-          const slice = binary.slice(offset, offset + CHUNK_SIZE);
-          const buf = new Uint8Array(slice.length);
-          for (let j = 0; j < slice.length; j++) buf[j] = slice.charCodeAt(j);
-          await session.sendBinary(buf.buffer);
-          sent++;
-          done += buf.byteLength;
-          updateFile(item.id, { progress: Math.round((sent / totalChunks) * 100) });
-          setBytesDone(done);
-          const elapsed = (Date.now() - startTimeRef.current) / 1000;
-          if (elapsed > 0.2) setSpeed(done / elapsed);
-        }
+        await streamFileChunks(
+          item.uri!,
+          item.size,
+          async (chunk) => {
+            if (cancelledRef.current) throw new Error('Transfer cancelled');
+            await session.sendBinary(chunk);
+            sent++;
+            done += chunk.byteLength;
+            updateFile(item.id, {
+              progress: Math.min(99, Math.round((sent / totalChunks) * 100)),
+            });
+            setBytesDone(done);
+            const elapsed = (Date.now() - startTimeRef.current) / 1000;
+            if (elapsed > 0.2) setSpeed(done / elapsed);
+          },
+          { cancelled: cancelledRef.current }
+        );
 
         session.sendJson({ type: 'file-complete', fileId: item.id });
         updateFile(item.id, { status: 'completed', progress: 100 });
@@ -221,24 +243,31 @@ export default function TransferScreen() {
     async (data: ArrayBuffer | string) => {
       if (typeof data !== 'string') {
         let activeId: string | null = null;
-        for (const [id, buf] of incomingRef.current) {
-          if (buf.received < buf.totalChunks) {
+        for (const [id, entry] of writersRef.current) {
+          if (entry.received < entry.totalChunks) {
             activeId = id;
             break;
           }
         }
         if (!activeId) return;
-        const buf = incomingRef.current.get(activeId)!;
-        buf.chunks.push(data);
-        buf.received++;
-        const progress = Math.min(99, Math.round((buf.received / buf.totalChunks) * 100));
-        updateFile(activeId, { progress, status: 'receiving' });
-        setBytesDone((prev) => {
-          const next = prev + data.byteLength;
-          const elapsed = (Date.now() - startTimeRef.current) / 1000;
-          if (elapsed > 0.2) setSpeed(next / elapsed);
-          return next;
-        });
+        const entry = writersRef.current.get(activeId)!;
+        try {
+          await entry.writer.writeChunk(data);
+          entry.received++;
+          const progress = Math.min(99, Math.round((entry.received / entry.totalChunks) * 100));
+          updateFile(activeId, { progress, status: 'receiving' });
+          setBytesDone((prev) => {
+            const next = prev + data.byteLength;
+            const elapsed = (Date.now() - startTimeRef.current) / 1000;
+            if (elapsed > 0.2) setSpeed(next / elapsed);
+            return next;
+          });
+        } catch (e) {
+          updateFile(activeId, {
+            status: 'error',
+            error: e instanceof Error ? e.message : 'Write failed',
+          });
+        }
         return;
       }
 
@@ -274,12 +303,31 @@ export default function TransferScreen() {
         setError('Receiver declined the transfer.');
       } else if (msg.type === 'file-start') {
         const totalChunks = Math.ceil(msg.size / CHUNK_SIZE) || 1;
-        incomingRef.current.set(msg.fileId, {
-          meta: { id: msg.fileId, name: msg.name, size: msg.size, type: msg.mime },
-          chunks: [],
-          received: 0,
-          totalChunks,
-        });
+
+        if (!(await hasSaveDirectory())) {
+          const ok = await setupPublicSaveFolder();
+          if (!ok) {
+            updateFile(msg.fileId, { status: 'error', error: 'Save folder not set' });
+            return;
+          }
+        }
+
+        try {
+          const writer = await createStreamingWriter(msg.name, msg.mime, msg.size);
+          writersRef.current.set(msg.fileId, {
+            meta: { id: msg.fileId, name: msg.name, size: msg.size, type: msg.mime },
+            writer,
+            received: 0,
+            totalChunks,
+          });
+        } catch (e) {
+          updateFile(msg.fileId, {
+            status: 'error',
+            error: e instanceof Error ? e.message : 'Could not create writer',
+          });
+          return;
+        }
+
         setQueue((prev) => {
           if (prev.some((f) => f.id === msg.fileId)) {
             return prev.map((f) =>
@@ -301,30 +349,10 @@ export default function TransferScreen() {
         setPhase('transferring');
         if (!startTimeRef.current) startTimeRef.current = Date.now();
       } else if (msg.type === 'file-complete') {
-        const buf = incomingRef.current.get(msg.fileId);
-        if (!buf) return;
+        const entry = writersRef.current.get(msg.fileId);
+        if (!entry) return;
         try {
-          const full = buf.chunks.reduce((acc, c) => {
-            const u = new Uint8Array(acc.byteLength + c.byteLength);
-            u.set(new Uint8Array(acc), 0);
-            u.set(new Uint8Array(c), acc.byteLength);
-            return u.buffer;
-          }, new ArrayBuffer(0));
-
-          const bytes = new Uint8Array(full);
-          let bin = '';
-          const step = 0x8000;
-          for (let i = 0; i < bytes.length; i += step) {
-            bin += String.fromCharCode(...bytes.subarray(i, i + step));
-          }
-          const b64 = btoa(bin);
-
-          const saved = await saveReceivedFile(
-            buf.meta.name,
-            b64,
-            buf.meta.type,
-            buf.meta.size
-          );
+          const saved = await entry.writer.finish();
           updateFile(msg.fileId, {
             status: 'completed',
             progress: 100,
@@ -332,12 +360,18 @@ export default function TransferScreen() {
             displayPath: saved.displayPath,
           });
           setSaveHint(`Saved to ${saved.displayPath}`);
-          incomingRef.current.delete(msg.fileId);
+          writersRef.current.delete(msg.fileId);
         } catch (e) {
           updateFile(msg.fileId, {
             status: 'error',
             error: e instanceof Error ? e.message : 'Save failed',
           });
+          try {
+            await entry.writer.abort();
+          } catch {
+            /* */
+          }
+          writersRef.current.delete(msg.fileId);
         }
       } else if (msg.type === 'transfer-complete') {
         setPhase('completed');
@@ -345,6 +379,14 @@ export default function TransferScreen() {
         emitRoomComplete();
       } else if (msg.type === 'transfer-cancelled') {
         cancelledRef.current = true;
+        for (const [, entry] of writersRef.current) {
+          try {
+            await entry.writer.abort();
+          } catch {
+            /* */
+          }
+        }
+        writersRef.current.clear();
         setPhase('failed');
         setError('Transfer cancelled.');
       } else if (msg.type === 'transfer-error') {
@@ -531,16 +573,16 @@ export default function TransferScreen() {
           {queue.map((f) => (
             <View key={f.id} style={styles.fileRow}>
               <View style={{ flex: 1 }}>
-                <Text style={styles.fileName} numberOfLines={1}>{f.name}</Text>
+                <Text style={styles.fileName} numberOfLines={1}>
+                  {f.name}
+                </Text>
                 <Text style={styles.fileMeta}>
                   {f.status === 'completed'
                     ? `Saved · ${f.displayPath || 'LocalDrop/' + f.name}`
                     : `${f.status} · ${f.progress}% · ${formatBytes(f.size)}`}
                 </Text>
               </View>
-              {f.status === 'completed' && (
-                <Text style={styles.savedBadge}>Saved</Text>
-              )}
+              {f.status === 'completed' && <Text style={styles.savedBadge}>Saved</Text>}
             </View>
           ))}
         </View>
@@ -617,8 +659,14 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   cancelText: { color: '#ef4444' },
-  progressBox: { marginVertical: 16 },
-  barBg: { height: 8, backgroundColor: '#333', borderRadius: 4, overflow: 'hidden' },
+  progressBox: { marginVertical: 16, alignItems: 'center' },
+  barBg: {
+    height: 8,
+    backgroundColor: '#333',
+    borderRadius: 4,
+    overflow: 'hidden',
+    width: '100%',
+  },
   barFill: { height: '100%', backgroundColor: '#3b82f6' },
   stats: { color: '#fff', marginTop: 8, textAlign: 'center' },
   speed: { color: '#888', textAlign: 'center', marginTop: 4 },
@@ -631,27 +679,22 @@ const styles = StyleSheet.create({
     padding: 12,
     marginBottom: 8,
   },
-  fileName: { color: '#fff' },
+  fileName: { color: '#fff', fontSize: 14 },
   fileMeta: { color: '#888', fontSize: 12, marginTop: 2 },
-  savedBadge: { color: '#22c55e', fontWeight: '700', fontSize: 12 },
-  done: { color: '#22c55e', textAlign: 'center', fontSize: 18, fontWeight: '700', marginTop: 16 },
-  saveHint: { color: '#94a3b8', textAlign: 'center', fontSize: 12, marginTop: 8 },
+  savedBadge: { color: '#22c55e', fontWeight: '600', fontSize: 12 },
+  done: { color: '#22c55e', fontWeight: '700', fontSize: 18, textAlign: 'center', marginTop: 16 },
   receivedBtn: {
-    marginTop: 16,
-    backgroundColor: '#3b82f6',
-    borderRadius: 12,
-    paddingVertical: 14,
-    alignItems: 'center',
-  },
-  receivedBtnText: { color: '#fff', fontWeight: '600' },
-  error: { color: '#ef4444', textAlign: 'center', marginTop: 12 },
-  homeBtn: {
-    marginTop: 32,
+    backgroundColor: '#1a1a1a',
     borderWidth: 1,
-    borderColor: '#333',
-    borderRadius: 12,
+    borderColor: '#3b82f6',
+    borderRadius: 14,
     paddingVertical: 14,
     alignItems: 'center',
+    marginTop: 12,
   },
-  homeText: { color: '#fff' },
+  receivedBtnText: { color: '#3b82f6', fontWeight: '600' },
+  saveHint: { color: '#888', textAlign: 'center', marginTop: 8, fontSize: 13 },
+  error: { color: '#ef4444', textAlign: 'center', marginTop: 16 },
+  homeBtn: { marginTop: 32, alignItems: 'center' },
+  homeText: { color: '#888' },
 });

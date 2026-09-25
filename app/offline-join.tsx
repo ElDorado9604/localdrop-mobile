@@ -9,7 +9,6 @@ import {
   ActivityIndicator,
   ScrollView,
   Alert,
-  Platform,
   Pressable,
 } from 'react-native';
 import { useRouter, useFocusEffect } from 'expo-router';
@@ -19,8 +18,7 @@ import { encodeRoomAnswer, decodeRoomPayload } from '../src/lib/offlineSignal';
 import { setOfflineSession } from '../src/lib/offlineSessionStore';
 import { PairingMethodPicker } from '../src/components/PairingMethodPicker';
 import { startNearbyGuest } from '../src/lib/nearbyPairing';
-
-const DEVICE_NAME = Platform.OS === 'ios' ? 'iPhone' : 'Android Device';
+import { getDisplayName } from '../src/lib/deviceName';
 
 export default function OfflineJoinScreen() {
   const router = useRouter();
@@ -58,17 +56,18 @@ export default function OfflineJoinScreen() {
 
     setPhase('creating');
     setError(null);
-    setHostName(decoded.name);
+    setHostName(decoded.name || 'Host');
     setRoomCode(decoded.code);
 
     try {
+      const displayName = await getDisplayName();
       const session = new WebRTCSession();
       sessionRef.current = session;
 
       session.setHandlers({
         onOpen: () => {
           setOfflineSession(session, {
-            peerName: decoded.name,
+            peerName: decoded.name || 'Host',
             roomCode: decoded.code,
             isHost: false,
           });
@@ -83,7 +82,7 @@ export default function OfflineJoinScreen() {
       const answer = await session.handleOfferForQr(decoded.sdp);
       const payload = encodeRoomAnswer({
         code: decoded.code,
-        name: DEVICE_NAME,
+        name: displayName,
         sdp: answer,
       });
       setAnswerPayload(payload);
@@ -100,11 +99,12 @@ export default function OfflineJoinScreen() {
     setStatus('Looking for nearby room…');
 
     try {
+      const displayName = await getDisplayName();
       const guest = await startNearbyGuest({ onStatus: setStatus });
       nearbyStopRef.current = guest.stop;
 
       setStatus('Room found — connecting…');
-      setHostName(guest.hostName);
+      setHostName(guest.hostName || 'Host');
       setRoomCode(guest.code);
 
       const decoded = decodeRoomPayload(guest.offerRaw);
@@ -119,7 +119,7 @@ export default function OfflineJoinScreen() {
         onOpen: () => {
           nearbyStopRef.current?.();
           setOfflineSession(session, {
-            peerName: decoded.name,
+            peerName: decoded.name || guest.hostName || 'Host',
             roomCode: decoded.code,
             isHost: false,
           });
@@ -134,11 +134,11 @@ export default function OfflineJoinScreen() {
       const answer = await session.handleOfferForQr(decoded.sdp);
       const payload = encodeRoomAnswer({
         code: decoded.code,
-        name: DEVICE_NAME,
+        name: displayName,
         sdp: answer,
       });
 
-      guest.sendAnswer(payload, DEVICE_NAME);
+      guest.sendAnswer(payload, displayName);
       setStatus('Answer sent — waiting for host to accept…');
       setPhase('waiting');
     } catch (e) {

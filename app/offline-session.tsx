@@ -1,6 +1,7 @@
 /**
  * Connected offline room: send / receive / send more / bidirectional.
  * Saves to public folder. Room stays open until Leave Room.
+ * Streaming I/O — supports files up to 200 GB without OOM.
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
@@ -14,7 +15,6 @@ import {
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import * as DocumentPicker from 'expo-document-picker';
-import * as FileSystem from 'expo-file-system/legacy';
 import {
   getOfflineSession,
   getOfflinePeerName,
@@ -28,12 +28,15 @@ import {
   formatBytes,
   formatSpeed,
   randomId,
+  MAX_FILE_SIZE,
 } from '../src/lib/transferProtocol';
 import {
-  saveReceivedFile,
+  createStreamingWriter,
   hasSaveDirectory,
   setupPublicSaveFolder,
 } from '../src/lib/saveReceivedFile';
+import { streamFileChunks } from '../src/lib/fileStream';
+import type { ReceivedFileWriter } from '../src/lib/fileStream';
 
 type QueuedFile = {
   id: string;
@@ -71,8 +74,17 @@ export default function OfflineSessionScreen() {
   const startTimeRef = useRef(0);
   const cancelledRef = useRef(false);
   const phaseRef = useRef(phase);
-  const incomingRef = useRef<
-    Map<string, { meta: FileMeta; chunks: ArrayBuffer[]; received: number; totalChunks: number }>
+  // Streaming receivers: one writer per active file
+  const writersRef = useRef<
+    Map<
+      string,
+      {
+        meta: FileMeta;
+        writer: ReceivedFileWriter;
+        received: number;
+        totalChunks: number;
+      }
+    >
   >(new Map());
 
   useEffect(() => {
@@ -101,6 +113,15 @@ export default function OfflineSessionScreen() {
     const pending = queueRef.current.filter((f) => f.status === 'pending' && f.uri);
     if (pending.length === 0) return;
 
+    // Soft guard — streaming can handle large files, but warn on extreme sizes
+    for (const f of pending) {
+      if (f.size > MAX_FILE_SIZE) {
+        setError(`File "${f.name}" exceeds the 200 GB limit.`);
+        setPhase('failed');
+        return;
+      }
+    }
+
     setPhase('transferring');
     cancelledRef.current = false;
     startTimeRef.current = Date.now();
@@ -126,26 +147,26 @@ export default function OfflineSessionScreen() {
       });
 
       try {
-        const base64 = await FileSystem.readAsStringAsync(item.uri!, {
-          encoding: FileSystem.EncodingType.Base64,
-        });
-        const binary = atob(base64);
-        const totalChunks = Math.ceil(binary.length / CHUNK_SIZE) || 1;
+        const totalChunks = Math.ceil(item.size / CHUNK_SIZE) || 1;
         let sent = 0;
 
-        for (let offset = 0; offset < binary.length; offset += CHUNK_SIZE) {
-          if (cancelledRef.current) break;
-          const slice = binary.slice(offset, offset + CHUNK_SIZE);
-          const buf = new Uint8Array(slice.length);
-          for (let j = 0; j < slice.length; j++) buf[j] = slice.charCodeAt(j);
-          await session.sendBinary(buf.buffer);
-          sent++;
-          done += buf.byteLength;
-          updateFile(item.id, { progress: Math.round((sent / totalChunks) * 100) });
-          setBytesDone(done);
-          const elapsed = (Date.now() - startTimeRef.current) / 1000;
-          if (elapsed > 0.2) setSpeed(done / elapsed);
-        }
+        await streamFileChunks(
+          item.uri!,
+          item.size,
+          async (chunk) => {
+            if (cancelledRef.current) throw new Error('Transfer cancelled');
+            await session.sendBinary(chunk);
+            sent++;
+            done += chunk.byteLength;
+            updateFile(item.id, {
+              progress: Math.min(99, Math.round((sent / totalChunks) * 100)),
+            });
+            setBytesDone(done);
+            const elapsed = (Date.now() - startTimeRef.current) / 1000;
+            if (elapsed > 0.2) setSpeed(done / elapsed);
+          },
+          { cancelled: cancelledRef.current }
+        );
 
         session.sendJson({ type: 'file-complete', fileId: item.id });
         updateFile(item.id, { status: 'completed', progress: 100 });
@@ -169,26 +190,35 @@ export default function OfflineSessionScreen() {
   const handleProtocol = useCallback(
     async (data: ArrayBuffer | string) => {
       const session = getOfflineSession();
+
+      // Binary chunk
       if (typeof data !== 'string') {
         let activeId: string | null = null;
-        for (const [id, buf] of incomingRef.current) {
-          if (buf.received < buf.totalChunks) {
+        for (const [id, entry] of writersRef.current) {
+          if (entry.received < entry.totalChunks) {
             activeId = id;
             break;
           }
         }
         if (!activeId) return;
-        const buf = incomingRef.current.get(activeId)!;
-        buf.chunks.push(data);
-        buf.received++;
-        const progress = Math.min(99, Math.round((buf.received / buf.totalChunks) * 100));
-        updateFile(activeId, { progress, status: 'receiving' });
-        setBytesDone((prev) => {
-          const next = prev + data.byteLength;
-          const elapsed = (Date.now() - startTimeRef.current) / 1000;
-          if (elapsed > 0.2) setSpeed(next / elapsed);
-          return next;
-        });
+        const entry = writersRef.current.get(activeId)!;
+        try {
+          await entry.writer.writeChunk(data);
+          entry.received++;
+          const progress = Math.min(99, Math.round((entry.received / entry.totalChunks) * 100));
+          updateFile(activeId, { progress, status: 'receiving' });
+          setBytesDone((prev) => {
+            const next = prev + data.byteLength;
+            const elapsed = (Date.now() - startTimeRef.current) / 1000;
+            if (elapsed > 0.2) setSpeed(next / elapsed);
+            return next;
+          });
+        } catch (e) {
+          updateFile(activeId, {
+            status: 'error',
+            error: e instanceof Error ? e.message : 'Write failed',
+          });
+        }
         return;
       }
 
@@ -224,12 +254,31 @@ export default function OfflineSessionScreen() {
         setError('File transfer was declined.');
       } else if (msg.type === 'file-start') {
         const totalChunks = Math.ceil(msg.size / CHUNK_SIZE) || 1;
-        incomingRef.current.set(msg.fileId, {
-          meta: { id: msg.fileId, name: msg.name, size: msg.size, type: msg.mime },
-          chunks: [],
-          received: 0,
-          totalChunks,
-        });
+
+        if (!(await hasSaveDirectory())) {
+          const ok = await setupPublicSaveFolder();
+          if (!ok) {
+            updateFile(msg.fileId, { status: 'error', error: 'Save folder not set' });
+            return;
+          }
+        }
+
+        try {
+          const writer = await createStreamingWriter(msg.name, msg.mime, msg.size);
+          writersRef.current.set(msg.fileId, {
+            meta: { id: msg.fileId, name: msg.name, size: msg.size, type: msg.mime },
+            writer,
+            received: 0,
+            totalChunks,
+          });
+        } catch (e) {
+          updateFile(msg.fileId, {
+            status: 'error',
+            error: e instanceof Error ? e.message : 'Could not create writer',
+          });
+          return;
+        }
+
         setQueue((prev) => {
           if (prev.some((f) => f.id === msg.fileId)) {
             return prev.map((f) =>
@@ -251,53 +300,42 @@ export default function OfflineSessionScreen() {
         setPhase('transferring');
         if (!startTimeRef.current) startTimeRef.current = Date.now();
       } else if (msg.type === 'file-complete') {
-        const buf = incomingRef.current.get(msg.fileId);
-        if (!buf) return;
+        const entry = writersRef.current.get(msg.fileId);
+        if (!entry) return;
         try {
-          if (!(await hasSaveDirectory())) {
-            const ok = await setupPublicSaveFolder();
-            if (!ok) throw new Error('Save folder not set');
-          }
-
-          const full = buf.chunks.reduce((acc, c) => {
-            const u = new Uint8Array(acc.byteLength + c.byteLength);
-            u.set(new Uint8Array(acc), 0);
-            u.set(new Uint8Array(c), acc.byteLength);
-            return u.buffer;
-          }, new ArrayBuffer(0));
-
-          const bytes = new Uint8Array(full);
-          let bin = '';
-          const step = 0x8000;
-          for (let i = 0; i < bytes.length; i += step) {
-            bin += String.fromCharCode(...bytes.subarray(i, i + step));
-          }
-          const b64 = btoa(bin);
-
-          const saved = await saveReceivedFile(
-            buf.meta.name,
-            b64,
-            buf.meta.type,
-            buf.meta.size
-          );
+          const saved = await entry.writer.finish();
           updateFile(msg.fileId, {
             status: 'completed',
             progress: 100,
             localPath: saved.path,
             displayPath: saved.displayPath,
           });
-          incomingRef.current.delete(msg.fileId);
+          writersRef.current.delete(msg.fileId);
         } catch (e) {
           updateFile(msg.fileId, {
             status: 'error',
             error: e instanceof Error ? e.message : 'Save failed',
           });
+          try {
+            await entry.writer.abort();
+          } catch {
+            /* */
+          }
+          writersRef.current.delete(msg.fileId);
         }
       } else if (msg.type === 'transfer-complete') {
         session?.prepareForMore();
         setPhase('completed');
       } else if (msg.type === 'transfer-cancelled') {
         cancelledRef.current = true;
+        for (const [, entry] of writersRef.current) {
+          try {
+            await entry.writer.abort();
+          } catch {
+            /* */
+          }
+        }
+        writersRef.current.clear();
         setPhase('ready');
         setError('Transfer cancelled');
       } else if (msg.type === 'transfer-error') {
@@ -340,7 +378,7 @@ export default function OfflineSessionScreen() {
     try {
       const result = await DocumentPicker.getDocumentAsync({
         multiple: true,
-        copyToCacheDirectory: true,
+        copyToCacheDirectory: true, // still needed for reliable reading on many Android versions
       });
       if (result.canceled || !result.assets?.length) return;
 
@@ -353,6 +391,13 @@ export default function OfflineSessionScreen() {
         status: 'pending',
         progress: 0,
       }));
+
+      // Guard against absurd sizes early
+      const tooBig = files.find((f) => f.size > MAX_FILE_SIZE);
+      if (tooBig) {
+        Alert.alert('File too large', `"${tooBig.name}" exceeds the 200 GB limit.`);
+        return;
+      }
 
       setQueue(files);
       queueRef.current = files;
@@ -405,7 +450,7 @@ export default function OfflineSessionScreen() {
     setSpeed(0);
     setError(null);
     cancelledRef.current = false;
-    incomingRef.current.clear();
+    writersRef.current.clear();
     getOfflineSession()?.prepareForMore();
     setPhase('ready');
   }
@@ -429,6 +474,10 @@ export default function OfflineSessionScreen() {
             } catch {
               /* */
             }
+            for (const [, entry] of writersRef.current) {
+              entry.writer.abort().catch(() => {});
+            }
+            writersRef.current.clear();
             clearOfflineSession();
             router.replace('/offline');
           },
@@ -608,18 +657,18 @@ const styles = StyleSheet.create({
     padding: 12,
     marginBottom: 8,
   },
-  fileName: { color: '#fff' },
+  fileName: { color: '#fff', fontSize: 14 },
   fileMeta: { color: '#888', fontSize: 12, marginTop: 2 },
-  savedBadge: { color: '#22c55e', fontWeight: '700', fontSize: 12 },
-  done: { color: '#22c55e', fontSize: 18, fontWeight: '700', marginBottom: 8 },
-  error: { color: '#ef4444', textAlign: 'center', marginTop: 12 },
+  savedBadge: { color: '#22c55e', fontWeight: '600', fontSize: 12 },
+  error: { color: '#ef4444', textAlign: 'center', marginTop: 16 },
   endBtn: {
     marginTop: 32,
     borderWidth: 1,
     borderColor: '#ef4444',
-    borderRadius: 12,
+    borderRadius: 14,
     paddingVertical: 14,
     alignItems: 'center',
   },
-  endText: { color: '#ef4444' },
+  endText: { color: '#ef4444', fontWeight: '600' },
+  done: { color: '#22c55e', fontWeight: '700', fontSize: 18, marginBottom: 8 },
 });

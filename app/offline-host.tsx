@@ -10,7 +10,6 @@ import {
   ActivityIndicator,
   ScrollView,
   Alert,
-  Platform,
 } from 'react-native';
 import { useRouter, useFocusEffect } from 'expo-router';
 import QRCode from 'react-native-qrcode-svg';
@@ -23,8 +22,7 @@ import {
 import { setOfflineSession, clearOfflineSession } from '../src/lib/offlineSessionStore';
 import { PairingMethodPicker } from '../src/components/PairingMethodPicker';
 import { startNearbyHost } from '../src/lib/nearbyPairing';
-
-const DEVICE_NAME = Platform.OS === 'ios' ? 'iPhone' : 'Android Device';
+import { getDisplayName } from '../src/lib/deviceName';
 
 export default function OfflineHostScreen() {
   const router = useRouter();
@@ -44,11 +42,18 @@ export default function OfflineHostScreen() {
     null
   );
   const [error, setError] = useState<string | null>(null);
+  const [myName, setMyName] = useState('Device');
   const sessionRef = useRef<WebRTCSession | null>(null);
   const codeRef = useRef('');
   const peerNameRef = useRef('peer');
   const startedRef = useRef(false);
   const nearbyStopRef = useRef<(() => void) | null>(null);
+
+  useFocusEffect(
+    useCallback(() => {
+      void getDisplayName().then(setMyName);
+    }, [])
+  );
 
   const onAnswerScanned = useCallback((raw: string) => {
     const decoded = decodeRoomPayload(raw);
@@ -60,8 +65,8 @@ export default function OfflineHostScreen() {
       Alert.alert('Wrong room', 'This answer is for a different room.');
       return;
     }
-    peerNameRef.current = decoded.name;
-    setPendingJoin({ name: decoded.name, sdp: decoded.sdp, code: decoded.code });
+    peerNameRef.current = decoded.name || 'Device';
+    setPendingJoin({ name: peerNameRef.current, sdp: decoded.sdp, code: decoded.code });
     setPhase('review-join');
   }, []);
 
@@ -89,6 +94,9 @@ export default function OfflineHostScreen() {
     setError(null);
 
     try {
+      const displayName = await getDisplayName();
+      setMyName(displayName);
+
       const code = generateRoomCode();
       codeRef.current = code;
       setRoomCode(code);
@@ -114,7 +122,7 @@ export default function OfflineHostScreen() {
       const local = await session.createOfferForQr();
       const payload = encodeRoomOffer({
         code,
-        name: DEVICE_NAME,
+        name: displayName,
         sdp: local,
       });
       setOfferPayload(payload);
@@ -134,6 +142,9 @@ export default function OfflineHostScreen() {
     setStatus('Creating room…');
 
     try {
+      const displayName = await getDisplayName();
+      setMyName(displayName);
+
       const code = generateRoomCode();
       codeRef.current = code;
       setRoomCode(code);
@@ -160,7 +171,7 @@ export default function OfflineHostScreen() {
       const local = await session.createOfferForQr();
       const payload = encodeRoomOffer({
         code,
-        name: DEVICE_NAME,
+        name: displayName,
         sdp: local,
       });
 
@@ -169,7 +180,7 @@ export default function OfflineHostScreen() {
 
       const result = await startNearbyHost({
         offerRaw: payload,
-        name: DEVICE_NAME,
+        name: displayName,
         code,
         onStatus: setStatus,
       });
@@ -179,7 +190,7 @@ export default function OfflineHostScreen() {
       if (!decoded || decoded.type !== 'answer') {
         throw new Error('Invalid answer from nearby device');
       }
-      peerNameRef.current = result.peerName || decoded.name;
+      peerNameRef.current = result.peerName || decoded.name || 'Device';
       setPendingJoin({
         name: peerNameRef.current,
         sdp: decoded.sdp,
@@ -266,6 +277,7 @@ export default function OfflineHostScreen() {
             On the other phone: Join Room → Connect nearby. Stay on the same Wi‑Fi or hotspot.
           </Text>
           {!!roomCode && <Text style={styles.codeLabel}>Room {roomCode}</Text>}
+          <Text style={styles.deviceName}>You: {myName}</Text>
           <Text style={styles.waiting}>{status || 'Broadcasting…'}</Text>
           <Pressable style={styles.cancelBtn} onPress={cancelRoom}>
             <Text style={styles.cancelText}>Cancel Room</Text>
@@ -282,7 +294,7 @@ export default function OfflineHostScreen() {
           <View style={styles.qrBox}>
             <QRCode value={offerPayload} size={220} backgroundColor="#fff" color="#000" />
           </View>
-          <Text style={styles.deviceName}>Host: {DEVICE_NAME}</Text>
+          <Text style={styles.deviceName}>You: {myName}</Text>
           {!!roomCode && <Text style={styles.codeLabel}>Room {roomCode}</Text>}
           <Text style={styles.waiting}>Waiting for the other device…</Text>
           <Pressable
@@ -306,7 +318,8 @@ export default function OfflineHostScreen() {
         <View style={styles.reviewBox}>
           <Text style={styles.reviewTitle}>Join request</Text>
           <Text style={styles.reviewBody}>
-            <Text style={{ fontWeight: '700' }}>{pendingJoin.name}</Text> wants to join.
+            <Text style={{ fontWeight: '700', color: '#fff' }}>{pendingJoin.name}</Text>
+            {' wants to join.'}
           </Text>
           <View style={styles.row}>
             <Pressable style={styles.acceptBtn} onPress={acceptJoin}>
@@ -344,7 +357,7 @@ const styles = StyleSheet.create({
     marginBottom: 20,
   },
   codeLabel: { color: '#94a3b8', fontSize: 13, marginBottom: 8 },
-  deviceName: { color: '#3b82f6', marginBottom: 4 },
+  deviceName: { color: '#3b82f6', marginBottom: 8, fontWeight: '600' },
   waiting: { color: '#fbbf24', fontSize: 13, marginBottom: 20, textAlign: 'center' },
   status: { color: '#aaa', marginTop: 12, textAlign: 'center' },
   primaryBtn: {

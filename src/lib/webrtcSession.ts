@@ -14,6 +14,10 @@ import { waitForIceComplete } from './offlineSignal';
 
 type SignalHandler = (type: 'offer' | 'answer' | 'ice-candidate', payload: any) => void;
 
+// Allow more in-flight data before pausing (higher throughput on LAN)
+const BUFFER_HIGH = 1024 * 1024; // 1 MB
+const BUFFER_LOW = 256 * 1024; // resume under 256 KB
+
 export class WebRTCSession {
   private pc: any = null;
   private channel: any = null;
@@ -40,7 +44,6 @@ export class WebRTCSession {
     this.onMessage = h.onMessage ?? null;
     this.onClose = h.onClose ?? null;
     this.onFailed = h.onFailed ?? null;
-    // Re-bind if channel already open
     if (this.channel) this.wireChannel(this.channel);
   }
 
@@ -98,7 +101,6 @@ export class WebRTCSession {
     return offer;
   }
 
-  /** Offline: create offer and wait for ICE so full SDP fits in one QR. */
   async createOfferForQr(): Promise<any> {
     const pc = this.ensurePc(true);
     const offer = await pc.createOffer({});
@@ -118,7 +120,6 @@ export class WebRTCSession {
     return answer;
   }
 
-  /** Offline: handle offer, wait for ICE, return answer SDP for QR. */
   async handleOfferForQr(sdp: any): Promise<any> {
     const pc = this.ensurePc(false);
     await pc.setRemoteDescription(new RTCSessionDescription(sdp));
@@ -182,8 +183,30 @@ export class WebRTCSession {
   async sendBinary(data: ArrayBuffer) {
     const ch = this.channel;
     if (!ch || ch.readyState !== 'open') throw new Error('Channel closed');
-    while ((ch.bufferedAmount ?? 0) > 256 * 1024) {
-      await new Promise((r) => setTimeout(r, 30));
+
+    // Wait only when buffer is truly high — allows pipelining for speed
+    while ((ch.bufferedAmount ?? 0) > BUFFER_HIGH) {
+      await new Promise<void>((resolve) => {
+        let settled = false;
+        const done = () => {
+          if (settled) return;
+          settled = true;
+          try {
+            ch.removeEventListener?.('bufferedamountlow', done);
+          } catch {
+            /* */
+          }
+          resolve();
+        };
+        try {
+          ch.bufferedAmountLowThreshold = BUFFER_LOW;
+          ch.addEventListener?.('bufferedamountlow', done);
+        } catch {
+          /* */
+        }
+        // Fallback poll
+        setTimeout(done, 20);
+      });
     }
     ch.send(data);
   }
@@ -192,7 +215,6 @@ export class WebRTCSession {
     this.completed = true;
   }
 
-  /** Offline: allow more transfers — clear completed flag but keep channel. */
   prepareForMore() {
     this.completed = false;
   }

@@ -1,4 +1,4 @@
-export const CHUNK_SIZE = 64 * 1024; // 64 KB — keeps WebRTC + JS memory stable
+export const CHUNK_SIZE = 256 * 1024; // 256 KB — better throughput on LAN/hotspot
 export const MAX_FILE_SIZE = 200 * 1024 * 1024 * 1024; // 200 GB theoretical max (streaming required)
 
 export type FileMeta = {

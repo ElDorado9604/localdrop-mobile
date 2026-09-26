@@ -37,6 +37,7 @@ import {
 import { streamFileChunks } from '../src/lib/fileStream';
 import type { ReceivedFileWriter } from '../src/lib/fileStream';
 import { getDisplayName } from '../src/lib/deviceName';
+import { setTransferKeepAwake } from '../src/lib/keepTransferAwake';
 
 type QueuedFile = {
   id: string;
@@ -92,6 +93,14 @@ export default function OfflineSessionScreen() {
   }, [queue]);
   useEffect(() => {
     phaseRef.current = phase;
+  }, [phase]);
+
+  // Keep screen on during active transfer (helps hotspot + long files)
+  useEffect(() => {
+    void setTransferKeepAwake(phase === 'transferring');
+    return () => {
+      void setTransferKeepAwake(false);
+    };
   }, [phase]);
 
   const updateFile = useCallback((id: string, patch: Partial<QueuedFile>) => {
@@ -170,14 +179,8 @@ export default function OfflineSessionScreen() {
             await session.sendBinary(chunk);
             sentChunks++;
             sentBytes += chunk.byteLength;
-            bytesDoneRef.current = Math.min(
-              total,
-              bytesDoneRef.current - (sentBytes - chunk.byteLength) + sentBytes
-            );
-            // Simpler: track global done
-            const globalDone = pending
-              .slice(0, i)
-              .reduce((s, f) => s + f.size, 0) + sentBytes;
+            const globalDone =
+              pending.slice(0, i).reduce((s, f) => s + f.size, 0) + sentBytes;
             bytesDoneRef.current = Math.min(total, globalDone);
             setBytesDone(bytesDoneRef.current);
             updateFile(item.id, {
@@ -219,7 +222,6 @@ export default function OfflineSessionScreen() {
     async (data: ArrayBuffer | string) => {
       const session = getOfflineSession();
 
-      // Binary chunk
       if (typeof data !== 'string') {
         let activeId: string | null = null;
         for (const [id, entry] of writersRef.current) {
@@ -347,7 +349,6 @@ export default function OfflineSessionScreen() {
         const entry = writersRef.current.get(msg.fileId);
         if (!entry) return;
 
-        // Require reasonable completeness (allow small rounding)
         if (entry.receivedBytes < entry.meta.size * 0.98) {
           const errMsg = `Incomplete file: got ${formatBytes(entry.receivedBytes)} of ${formatBytes(entry.meta.size)}`;
           updateFile(msg.fileId, { status: 'error', error: errMsg });
@@ -386,12 +387,10 @@ export default function OfflineSessionScreen() {
           setError(errMsg);
         }
       } else if (msg.type === 'transfer-complete') {
-        // Only mark completed if every local file is truly done
         if (allFilesOk()) {
           session?.prepareForMore();
           setPhase('completed');
         } else {
-          // Peer thinks done but we have errors — stay failed/ready
           const hasError = queueRef.current.some((f) => f.status === 'error');
           if (hasError) {
             setPhase('failed');
@@ -623,6 +622,7 @@ export default function OfflineSessionScreen() {
             {progress}% · {formatBytes(bytesDone)} / {formatBytes(bytesTotal)}
           </Text>
           {speed > 0 && <Text style={styles.speed}>{formatSpeed(speed)}</Text>}
+          <Text style={styles.keepHint}>Keep this screen open during transfer</Text>
         </View>
       )}
 
@@ -695,6 +695,7 @@ const styles = StyleSheet.create({
   center: { alignItems: 'center', marginVertical: 24 },
   ready: { color: '#22c55e', fontWeight: '600', marginBottom: 16 },
   hint: { color: '#888', marginTop: 12, textAlign: 'center', fontSize: 13 },
+  keepHint: { color: '#fbbf24', fontSize: 11, marginTop: 8, textAlign: 'center' },
   primaryBtn: {
     backgroundColor: '#3b82f6',
     borderRadius: 14,

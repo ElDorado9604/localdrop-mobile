@@ -32,6 +32,7 @@ import {
 } from '../src/lib/saveReceivedFile';
 import { streamFileChunks } from '../src/lib/fileStream';
 import type { ReceivedFileWriter } from '../src/lib/fileStream';
+import { getDisplayName } from '../src/lib/deviceName';
 
 type QueuedFile = {
   id: string;
@@ -84,7 +85,7 @@ export default function TransferScreen() {
       {
         meta: FileMeta;
         writer: ReceivedFileWriter;
-        received: number;
+        receivedBytes: number;
         totalChunks: number;
       }
     >
@@ -123,13 +124,18 @@ export default function TransferScreen() {
     });
   }, []);
 
+  const allFilesOk = useCallback(() => {
+    const q = queueRef.current;
+    return q.length > 0 && q.every((f) => f.status === 'completed');
+  }, []);
+
   const runSend = useCallback(async () => {
     const session = sessionRef.current;
     if (!session) return;
 
     const pending = queueRef.current.filter((f) => f.status === 'pending' && f.uri);
     if (pending.length === 0) {
-      setError('No files to send (list empty). Go back and pick files again.');
+      setError('No files to send');
       setPhase('failed');
       return;
     }
@@ -148,6 +154,7 @@ export default function TransferScreen() {
     let done = 0;
     const total = pending.reduce((s, f) => s + f.size, 0);
     setBytesTotal(total);
+    setBytesDone(0);
 
     for (let i = 0; i < pending.length; i++) {
       if (cancelledRef.current) break;
@@ -179,10 +186,11 @@ export default function TransferScreen() {
             done += chunk.byteLength;
             updateFile(item.id, {
               progress: Math.min(99, Math.round((sent / totalChunks) * 100)),
+              status: 'sending',
             });
-            setBytesDone(done);
+            setBytesDone(Math.min(total, done));
             const elapsed = (Date.now() - startTimeRef.current) / 1000;
-            if (elapsed > 0.2) setSpeed(done / elapsed);
+            if (elapsed > 0.25) setSpeed(done / elapsed);
           },
           { cancelled: cancelledRef.current }
         );
@@ -199,15 +207,18 @@ export default function TransferScreen() {
       }
     }
 
-    if (!cancelledRef.current) {
+    if (!cancelledRef.current && allFilesOk()) {
       session.sendJson({ type: 'transfer-complete' });
       setPhase('completed');
       session.markCompleted();
       emitRoomComplete();
+    } else if (!cancelledRef.current) {
+      setPhase('failed');
+      setError('Transfer did not complete successfully');
     }
-  }, [updateFile]);
+  }, [updateFile, allFilesOk]);
 
-  const sendTransferOffer = useCallback(() => {
+  const sendTransferOffer = useCallback(async () => {
     const session = sessionRef.current;
     if (!session || !session.isChannelOpen()) return;
     if (offerSentRef.current) return;
@@ -215,6 +226,7 @@ export default function TransferScreen() {
     const pending = queueRef.current.filter((f) => f.status === 'pending');
     if (pending.length === 0) return;
 
+    const displayName = await getDisplayName();
     const metas: FileMeta[] = pending.map((q) => ({
       id: q.id,
       name: q.name,
@@ -229,7 +241,7 @@ export default function TransferScreen() {
       type: 'transfer-offer',
       files: metas,
       totalSize,
-      senderName: 'Android Device',
+      senderName: displayName,
     });
     if (!ok) {
       offerSentRef.current = false;
@@ -244,7 +256,7 @@ export default function TransferScreen() {
       if (typeof data !== 'string') {
         let activeId: string | null = null;
         for (const [id, entry] of writersRef.current) {
-          if (entry.received < entry.totalChunks) {
+          if (entry.receivedBytes < entry.meta.size) {
             activeId = id;
             break;
           }
@@ -253,13 +265,16 @@ export default function TransferScreen() {
         const entry = writersRef.current.get(activeId)!;
         try {
           await entry.writer.writeChunk(data);
-          entry.received++;
-          const progress = Math.min(99, Math.round((entry.received / entry.totalChunks) * 100));
+          entry.receivedBytes += data.byteLength;
+          const progress = Math.min(
+            99,
+            Math.round((entry.receivedBytes / Math.max(1, entry.meta.size)) * 100)
+          );
           updateFile(activeId, { progress, status: 'receiving' });
           setBytesDone((prev) => {
             const next = prev + data.byteLength;
             const elapsed = (Date.now() - startTimeRef.current) / 1000;
-            if (elapsed > 0.2) setSpeed(next / elapsed);
+            if (elapsed > 0.25) setSpeed(next / elapsed);
             return next;
           });
         } catch (e) {
@@ -282,7 +297,7 @@ export default function TransferScreen() {
         setOffer({
           files: msg.files,
           totalSize: msg.totalSize,
-          senderName: msg.senderName,
+          senderName: msg.senderName || 'Peer',
         });
         setBytesTotal(msg.totalSize);
         setPhase('offering');
@@ -317,7 +332,7 @@ export default function TransferScreen() {
           writersRef.current.set(msg.fileId, {
             meta: { id: msg.fileId, name: msg.name, size: msg.size, type: msg.mime },
             writer,
-            received: 0,
+            receivedBytes: 0,
             totalChunks,
           });
         } catch (e) {
@@ -351,6 +366,21 @@ export default function TransferScreen() {
       } else if (msg.type === 'file-complete') {
         const entry = writersRef.current.get(msg.fileId);
         if (!entry) return;
+
+        if (entry.receivedBytes < entry.meta.size * 0.98) {
+          const errMsg = `Incomplete: ${formatBytes(entry.receivedBytes)} of ${formatBytes(entry.meta.size)}`;
+          updateFile(msg.fileId, { status: 'error', error: errMsg });
+          try {
+            await entry.writer.abort();
+          } catch {
+            /* */
+          }
+          writersRef.current.delete(msg.fileId);
+          setPhase('failed');
+          setError(errMsg);
+          return;
+        }
+
         try {
           const saved = await entry.writer.finish();
           updateFile(msg.fileId, {
@@ -374,9 +404,11 @@ export default function TransferScreen() {
           writersRef.current.delete(msg.fileId);
         }
       } else if (msg.type === 'transfer-complete') {
-        setPhase('completed');
-        sessionRef.current?.markCompleted();
-        emitRoomComplete();
+        if (allFilesOk()) {
+          setPhase('completed');
+          sessionRef.current?.markCompleted();
+          emitRoomComplete();
+        }
       } else if (msg.type === 'transfer-cancelled') {
         cancelledRef.current = true;
         for (const [, entry] of writersRef.current) {
@@ -394,7 +426,7 @@ export default function TransferScreen() {
         setError(msg.message);
       }
     },
-    [updateFile, runSend]
+    [updateFile, runSend, allFilesOk]
   );
 
   useEffect(() => {
@@ -425,7 +457,7 @@ export default function TransferScreen() {
         setPhase('ready');
         setError(null);
         if (role === 'sender') {
-          setTimeout(() => sendTransferOffer(), 400);
+          setTimeout(() => void sendTransferOffer(), 400);
         }
       },
       onMessage: (data) => void handleProtocol(data),
@@ -524,7 +556,7 @@ export default function TransferScreen() {
         <View style={styles.center}>
           <Text style={styles.ready}>Connected — ready to transfer</Text>
           {role === 'sender' && (
-            <Pressable style={styles.primaryBtn} onPress={sendTransferOffer}>
+            <Pressable style={styles.primaryBtn} onPress={() => void sendTransferOffer()}>
               <Text style={styles.primaryBtnText}>Send Files</Text>
             </Pressable>
           )}
@@ -536,7 +568,10 @@ export default function TransferScreen() {
 
       {phase === 'offering' && offer && (
         <View style={styles.offerBox}>
-          <Text style={styles.offerTitle}>{offer.senderName} wants to send:</Text>
+          <Text style={styles.offerTitle}>
+            <Text style={{ fontWeight: '700', color: '#fff' }}>{offer.senderName}</Text>
+            {' wants to send:'}
+          </Text>
           {offer.files.map((f) => (
             <Text key={f.id} style={styles.fileLine}>
               {f.name} ({formatBytes(f.size)})
@@ -579,7 +614,9 @@ export default function TransferScreen() {
                 <Text style={styles.fileMeta}>
                   {f.status === 'completed'
                     ? `Saved · ${f.displayPath || 'LocalDrop/' + f.name}`
-                    : `${f.status} · ${f.progress}% · ${formatBytes(f.size)}`}
+                    : f.status === 'error'
+                      ? `Error · ${f.error || 'failed'}`
+                      : `${f.status} · ${f.progress}% · ${formatBytes(f.size)}`}
                 </Text>
               </View>
               {f.status === 'completed' && <Text style={styles.savedBadge}>Saved</Text>}
@@ -639,7 +676,7 @@ const styles = StyleSheet.create({
     padding: 20,
     marginBottom: 16,
   },
-  offerTitle: { color: '#fff', fontWeight: '600', marginBottom: 12 },
+  offerTitle: { color: '#ccc', marginBottom: 12 },
   fileLine: { color: '#ccc', marginBottom: 4 },
   total: { color: '#888', marginTop: 8, marginBottom: 16 },
   row: { flexDirection: 'row', gap: 12 },

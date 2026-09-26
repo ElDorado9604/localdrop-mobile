@@ -1,7 +1,6 @@
 /**
  * Connect nearby — automatic WebRTC signaling on the same Wi‑Fi / hotspot.
- * Uses UDP broadcast so neither side needs to scan a QR.
- * (True BLE GATT can be layered later; LAN is required for file transfer anyway.)
+ * Uses UDP. Prefers unicast after first contact for better hotspot support.
  */
 import dgram from 'react-native-udp';
 import type { Socket } from 'react-native-udp';
@@ -21,7 +20,12 @@ type ChunkMsg = {
   code?: string;
 };
 
-function splitPayload(id: string, kind: 'offer' | 'answer', raw: string, meta: { name?: string; code?: string }): ChunkMsg[] {
+function splitPayload(
+  id: string,
+  kind: 'offer' | 'answer',
+  raw: string,
+  meta: { name?: string; code?: string }
+): ChunkMsg[] {
   const parts: ChunkMsg[] = [];
   const n = Math.max(1, Math.ceil(raw.length / CHUNK));
   for (let i = 0; i < n; i++) {
@@ -53,6 +57,11 @@ function makeId() {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
+function safeName(n?: string): string {
+  const t = (n || '').trim();
+  return t.length > 0 ? t.slice(0, 40) : 'Device';
+}
+
 export type NearbyHostResult = {
   answerRaw: string;
   peerName: string;
@@ -71,8 +80,9 @@ export function startNearbyHost(opts: {
     let timer: ReturnType<typeof setInterval> | null = null;
     let done = false;
     const id = makeId();
+    const hostName = safeName(opts.name);
     const chunks = splitPayload(id, 'offer', opts.offerRaw, {
-      name: opts.name,
+      name: hostName,
       code: opts.code,
     });
 
@@ -107,7 +117,7 @@ export function startNearbyHost(opts: {
               /* */
             }
           }
-        }, 800);
+        }, 700);
       });
 
       const answerParts = new Map<string, Map<number, string>>();
@@ -122,10 +132,10 @@ export function startNearbyHost(opts: {
 
           if (!answerParts.has(data.id)) answerParts.set(data.id, new Map());
           answerParts.get(data.id)!.set(data.i, data.p);
-          if (data.n) {
+          if (data.n != null) {
             answerMeta.set(data.id, {
               n: data.n,
-              name: data.name || 'Device',
+              name: safeName(data.name),
             });
           }
           const meta = answerMeta.get(data.id);
@@ -164,12 +174,11 @@ export type NearbyGuestResult = {
   offerRaw: string;
   hostName: string;
   code: string;
-  /** Call after you built the answer string */
   sendAnswer: (answerRaw: string, name: string) => void;
   stop: () => void;
 };
 
-/** Guest: listen for offer broadcasts, then send answer. */
+/** Guest: listen for offer broadcasts, then send answer (unicast preferred). */
 export function startNearbyGuest(opts: {
   onStatus?: (s: string) => void;
 }): Promise<NearbyGuestResult> {
@@ -206,10 +215,10 @@ export function startNearbyGuest(opts: {
 
           if (!offerParts.has(data.id)) offerParts.set(data.id, new Map());
           offerParts.get(data.id)!.set(data.i, data.p);
-          if (data.n) {
+          if (data.n != null) {
             offerMeta.set(data.id, {
               n: data.n,
-              name: data.name || 'Host',
+              name: safeName(data.name),
               code: data.code || '',
               rinfo: { address: rinfo.address },
             });
@@ -229,25 +238,25 @@ export function startNearbyGuest(opts: {
             code: meta.code,
             stop,
             sendAnswer: (answerRaw: string, name: string) => {
-              const id = makeId();
-              const chunks = splitPayload(id, 'answer', answerRaw, { name });
-              // Send a few times for reliability
+              const guestName = safeName(name);
+              const aid = makeId();
+              const chunks = splitPayload(aid, 'answer', answerRaw, { name: guestName });
               let rounds = 0;
               const t = setInterval(() => {
                 rounds++;
                 for (const c of chunks) {
                   const buf = JSON.stringify(c);
                   try {
+                    // Prefer unicast to host (works better on hotspot)
                     socket?.send(buf, 0, buf.length, PORT, hostAddr);
+                    // Also broadcast as fallback
                     socket?.send(buf, 0, buf.length, PORT, '255.255.255.255');
                   } catch {
                     /* */
                   }
                 }
-                if (rounds >= 8) {
-                  clearInterval(t);
-                }
-              }, 400);
+                if (rounds >= 10) clearInterval(t);
+              }, 350);
             },
           });
         } catch {

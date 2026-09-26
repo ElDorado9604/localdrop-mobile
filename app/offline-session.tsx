@@ -95,7 +95,6 @@ export default function OfflineSessionScreen() {
     phaseRef.current = phase;
   }, [phase]);
 
-  // Keep screen on during active transfer (helps hotspot + long files)
   useEffect(() => {
     void setTransferKeepAwake(phase === 'transferring');
     return () => {
@@ -125,7 +124,10 @@ export default function OfflineSessionScreen() {
       return;
     }
 
-    const pending = queueRef.current.filter((f) => f.status === 'pending' && f.uri);
+    // Include files just marked 'sending' (transfer-accepted path) as well as 'pending'
+    const pending = queueRef.current.filter(
+      (f) => (f.status === 'pending' || f.status === 'sending') && f.uri
+    );
     if (pending.length === 0) return;
 
     for (const f of pending) {
@@ -289,6 +291,18 @@ export default function OfflineSessionScreen() {
           }))
         );
       } else if (msg.type === 'transfer-accepted') {
+        // Mark files as sending immediately so UI does not stay on "pending"
+        setQueue((prev) => {
+          const next = prev.map((f) =>
+            f.status === 'pending' && f.uri
+              ? { ...f, status: 'sending' as const, progress: 0 }
+              : f
+          );
+          queueRef.current = next;
+          return next;
+        });
+        setPhase('transferring');
+        startTimeRef.current = Date.now();
         void runSend();
       } else if (msg.type === 'transfer-rejected') {
         setPhase('ready');
@@ -496,6 +510,7 @@ export default function OfflineSessionScreen() {
         setError('Channel not ready');
         return;
       }
+      // Waiting for peer to accept — show as pending until transfer-accepted
       setPhase('transferring');
     } catch {
       Alert.alert('Error', 'Could not pick files');

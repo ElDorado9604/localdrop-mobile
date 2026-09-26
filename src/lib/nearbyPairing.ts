@@ -1,6 +1,8 @@
 /**
- * Connect nearby — automatic WebRTC signaling on the same Wi‑Fi / hotspot.
- * UDP with broadcast + unicast preference for better hotspot support.
+ * Connect nearby — UDP signaling on same Wi‑Fi / hotspot.
+ * Simple reliable strategy: broadcast offers on 255.255.255.255;
+ * guest replies with unicast (+ broadcast fallback).
+ * Avoid flooding many directed addresses (that broke same-WiFi discovery).
  */
 import dgram from 'react-native-udp';
 import type { Socket } from 'react-native-udp';
@@ -62,18 +64,6 @@ function safeName(n?: string): string {
   return t.length > 0 ? t.slice(0, 40) : 'Device';
 }
 
-/** Common hotspot / LAN directed broadcast addresses to try. */
-function directedTargets(): string[] {
-  return [
-    '255.255.255.255',
-    '192.168.43.255', // common Android hotspot subnet
-    '192.168.137.255', // Windows hotspot
-    '192.168.0.255',
-    '192.168.1.255',
-    '10.0.0.255',
-  ];
-}
-
 export type NearbyHostResult = {
   answerRaw: string;
   peerName: string;
@@ -98,7 +88,6 @@ export function startNearbyHost(opts: {
       name: hostName,
       code: opts.code,
     });
-    const targets = directedTargets();
 
     const stop = () => {
       if (timer) clearInterval(timer);
@@ -129,31 +118,37 @@ export function startNearbyHost(opts: {
           tick++;
           for (const c of chunks) {
             const buf = JSON.stringify(c);
-            for (const addr of targets) {
+            try {
+              // Primary: global broadcast (works on most same-WiFi LANs)
+              socket?.send(buf, 0, buf.length, PORT, '255.255.255.255');
+            } catch {
+              /* */
+            }
+            // Light hotspot help: try Android soft-AP subnet occasionally
+            if (tick % 3 === 0) {
               try {
-                socket?.send(buf, 0, buf.length, PORT, addr);
+                socket?.send(buf, 0, buf.length, PORT, '192.168.43.255');
               } catch {
                 /* */
               }
             }
           }
-          if (tick === 8) {
-            opts.onStatus?.('Still waiting… If using hotspot, keep both screens on.');
+          if (tick === 10) {
+            opts.onStatus?.('Still waiting… Keep both screens on. Try QR if this fails.');
           }
-        }, 600);
+        }, 500);
 
-        // Give up after ~45s so UI can show a clear error
         timeout = setTimeout(() => {
           if (!done) {
             done = true;
             stop();
             reject(
               new Error(
-                'No device joined. Stay on the same Wi‑Fi/hotspot, keep screens on, or use QR instead.'
+                'No device joined. Same Wi‑Fi/hotspot required. Keep screens on, or use QR.'
               )
             );
           }
-        }, 45000);
+        }, 50000);
       });
 
       const answerParts = new Map<string, Map<number, string>>();
@@ -249,7 +244,7 @@ export function startNearbyGuest(opts: {
             )
           );
         }
-      }, 40000);
+      }, 45000);
 
       const offerParts = new Map<string, Map<number, string>>();
       const offerMeta = new Map<
@@ -299,24 +294,16 @@ export function startNearbyGuest(opts: {
                 for (const c of chunks) {
                   const buf = JSON.stringify(c);
                   try {
+                    // Unicast to host first (critical for hotspot)
                     socket?.send(buf, 0, buf.length, PORT, hostAddr);
+                    // Broadcast fallback
                     socket?.send(buf, 0, buf.length, PORT, '255.255.255.255');
-                    // Also try common hotspot directed broadcasts
-                    for (const addr of directedTargets()) {
-                      if (addr !== '255.255.255.255') {
-                        try {
-                          socket?.send(buf, 0, buf.length, PORT, addr);
-                        } catch {
-                          /* */
-                        }
-                      }
-                    }
                   } catch {
                     /* */
                   }
                 }
-                if (rounds >= 12) clearInterval(t);
-              }, 300);
+                if (rounds >= 15) clearInterval(t);
+              }, 250);
             },
           });
         } catch {

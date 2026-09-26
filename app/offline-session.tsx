@@ -1,7 +1,6 @@
 /**
  * Connected offline room: send / receive / send more / bidirectional.
- * Saves to public folder. Room stays open until Leave Room.
- * Streaming I/O — supports files up to 200 GB without OOM.
+ * Streaming I/O — supports large files. Strict completion + friendly names.
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
@@ -37,6 +36,7 @@ import {
 } from '../src/lib/saveReceivedFile';
 import { streamFileChunks } from '../src/lib/fileStream';
 import type { ReceivedFileWriter } from '../src/lib/fileStream';
+import { getDisplayName } from '../src/lib/deviceName';
 
 type QueuedFile = {
   id: string;
@@ -74,14 +74,14 @@ export default function OfflineSessionScreen() {
   const startTimeRef = useRef(0);
   const cancelledRef = useRef(false);
   const phaseRef = useRef(phase);
-  // Streaming receivers: one writer per active file
+  const bytesDoneRef = useRef(0);
   const writersRef = useRef<
     Map<
       string,
       {
         meta: FileMeta;
         writer: ReceivedFileWriter;
-        received: number;
+        receivedBytes: number;
         totalChunks: number;
       }
     >
@@ -102,6 +102,12 @@ export default function OfflineSessionScreen() {
     });
   }, []);
 
+  const allFilesOk = useCallback(() => {
+    const q = queueRef.current;
+    if (q.length === 0) return false;
+    return q.every((f) => f.status === 'completed');
+  }, []);
+
   const runSend = useCallback(async () => {
     const session = getOfflineSession();
     if (!session?.isChannelOpen()) {
@@ -113,7 +119,6 @@ export default function OfflineSessionScreen() {
     const pending = queueRef.current.filter((f) => f.status === 'pending' && f.uri);
     if (pending.length === 0) return;
 
-    // Soft guard — streaming can handle large files, but warn on extreme sizes
     for (const f of pending) {
       if (f.size > MAX_FILE_SIZE) {
         setError(`File "${f.name}" exceeds the 200 GB limit.`);
@@ -125,17 +130,17 @@ export default function OfflineSessionScreen() {
     setPhase('transferring');
     cancelledRef.current = false;
     startTimeRef.current = Date.now();
-    let done = 0;
+    bytesDoneRef.current = 0;
+    setBytesDone(0);
     const total = pending.reduce((s, f) => s + f.size, 0);
     setBytesTotal(total);
-    setBytesDone(0);
 
     for (let i = 0; i < pending.length; i++) {
       if (cancelledRef.current) break;
       const item = pending[i];
-      updateFile(item.id, { status: 'sending', progress: 0 });
+      updateFile(item.id, { status: 'sending', progress: 0, error: undefined });
 
-      session.sendJson({
+      const okStart = session.sendJson({
         type: 'file-start',
         fileId: item.id,
         name: item.name,
@@ -145,10 +150,17 @@ export default function OfflineSessionScreen() {
         index: i,
         totalFiles: pending.length,
       });
+      if (!okStart) {
+        updateFile(item.id, { status: 'error', error: 'Channel closed' });
+        setPhase('failed');
+        setError('Connection lost while sending');
+        return;
+      }
 
       try {
         const totalChunks = Math.ceil(item.size / CHUNK_SIZE) || 1;
-        let sent = 0;
+        let sentChunks = 0;
+        let sentBytes = 0;
 
         await streamFileChunks(
           item.uri!,
@@ -156,22 +168,34 @@ export default function OfflineSessionScreen() {
           async (chunk) => {
             if (cancelledRef.current) throw new Error('Transfer cancelled');
             await session.sendBinary(chunk);
-            sent++;
-            done += chunk.byteLength;
+            sentChunks++;
+            sentBytes += chunk.byteLength;
+            bytesDoneRef.current = Math.min(
+              total,
+              bytesDoneRef.current - (sentBytes - chunk.byteLength) + sentBytes
+            );
+            // Simpler: track global done
+            const globalDone = pending
+              .slice(0, i)
+              .reduce((s, f) => s + f.size, 0) + sentBytes;
+            bytesDoneRef.current = Math.min(total, globalDone);
+            setBytesDone(bytesDoneRef.current);
             updateFile(item.id, {
-              progress: Math.min(99, Math.round((sent / totalChunks) * 100)),
+              progress: Math.min(99, Math.round((sentChunks / totalChunks) * 100)),
+              status: 'sending',
             });
-            setBytesDone(done);
             const elapsed = (Date.now() - startTimeRef.current) / 1000;
-            if (elapsed > 0.2) setSpeed(done / elapsed);
+            if (elapsed > 0.25) setSpeed(bytesDoneRef.current / elapsed);
           },
           { cancelled: cancelledRef.current }
         );
 
+        if (cancelledRef.current) break;
+
         session.sendJson({ type: 'file-complete', fileId: item.id });
         updateFile(item.id, { status: 'completed', progress: 100 });
       } catch (e) {
-        const msg = e instanceof Error ? e.message : 'File transfer failed. Please try again.';
+        const msg = e instanceof Error ? e.message : 'File transfer failed';
         updateFile(item.id, { status: 'error', error: msg });
         session.sendJson({ type: 'transfer-error', message: msg });
         setPhase('failed');
@@ -180,12 +204,16 @@ export default function OfflineSessionScreen() {
       }
     }
 
-    if (!cancelledRef.current) {
+    if (!cancelledRef.current && allFilesOk()) {
       session.sendJson({ type: 'transfer-complete' });
       session.prepareForMore();
       setPhase('completed');
+      setBytesDone(total);
+    } else if (!cancelledRef.current) {
+      setPhase('failed');
+      setError('Transfer did not complete successfully');
     }
-  }, [updateFile]);
+  }, [updateFile, allFilesOk]);
 
   const handleProtocol = useCallback(
     async (data: ArrayBuffer | string) => {
@@ -195,7 +223,7 @@ export default function OfflineSessionScreen() {
       if (typeof data !== 'string') {
         let activeId: string | null = null;
         for (const [id, entry] of writersRef.current) {
-          if (entry.received < entry.totalChunks) {
+          if (entry.receivedBytes < entry.meta.size) {
             activeId = id;
             break;
           }
@@ -204,20 +232,30 @@ export default function OfflineSessionScreen() {
         const entry = writersRef.current.get(activeId)!;
         try {
           await entry.writer.writeChunk(data);
-          entry.received++;
-          const progress = Math.min(99, Math.round((entry.received / entry.totalChunks) * 100));
+          entry.receivedBytes += data.byteLength;
+          const progress = Math.min(
+            99,
+            Math.round((entry.receivedBytes / Math.max(1, entry.meta.size)) * 100)
+          );
           updateFile(activeId, { progress, status: 'receiving' });
           setBytesDone((prev) => {
-            const next = prev + data.byteLength;
+            const next = Math.min(bytesTotal || entry.meta.size, prev + data.byteLength);
             const elapsed = (Date.now() - startTimeRef.current) / 1000;
-            if (elapsed > 0.2) setSpeed(next / elapsed);
+            if (elapsed > 0.25) setSpeed(next / elapsed);
             return next;
           });
         } catch (e) {
-          updateFile(activeId, {
-            status: 'error',
-            error: e instanceof Error ? e.message : 'Write failed',
-          });
+          const msg = e instanceof Error ? e.message : 'Write failed';
+          updateFile(activeId, { status: 'error', error: msg });
+          try {
+            await entry.writer.abort();
+          } catch {
+            /* */
+          }
+          writersRef.current.delete(activeId);
+          session?.sendJson({ type: 'transfer-error', message: msg });
+          setPhase('failed');
+          setError(msg);
         }
         return;
       }
@@ -233,9 +271,10 @@ export default function OfflineSessionScreen() {
         setOffer({
           files: msg.files,
           totalSize: msg.totalSize,
-          senderName: msg.senderName,
+          senderName: msg.senderName || 'Peer',
         });
         setBytesTotal(msg.totalSize);
+        setBytesDone(0);
         setPhase('offering');
         setQueue(
           msg.files.map((f) => ({
@@ -259,6 +298,8 @@ export default function OfflineSessionScreen() {
           const ok = await setupPublicSaveFolder();
           if (!ok) {
             updateFile(msg.fileId, { status: 'error', error: 'Save folder not set' });
+            session?.sendJson({ type: 'transfer-error', message: 'Receiver has no save folder' });
+            setPhase('failed');
             return;
           }
         }
@@ -268,21 +309,24 @@ export default function OfflineSessionScreen() {
           writersRef.current.set(msg.fileId, {
             meta: { id: msg.fileId, name: msg.name, size: msg.size, type: msg.mime },
             writer,
-            received: 0,
+            receivedBytes: 0,
             totalChunks,
           });
         } catch (e) {
-          updateFile(msg.fileId, {
-            status: 'error',
-            error: e instanceof Error ? e.message : 'Could not create writer',
-          });
+          const errMsg = e instanceof Error ? e.message : 'Could not create writer';
+          updateFile(msg.fileId, { status: 'error', error: errMsg });
+          session?.sendJson({ type: 'transfer-error', message: errMsg });
+          setPhase('failed');
+          setError(errMsg);
           return;
         }
 
         setQueue((prev) => {
           if (prev.some((f) => f.id === msg.fileId)) {
             return prev.map((f) =>
-              f.id === msg.fileId ? { ...f, status: 'receiving', progress: 0 } : f
+              f.id === msg.fileId
+                ? { ...f, status: 'receiving', progress: 0, error: undefined }
+                : f
             );
           }
           return [
@@ -302,6 +346,23 @@ export default function OfflineSessionScreen() {
       } else if (msg.type === 'file-complete') {
         const entry = writersRef.current.get(msg.fileId);
         if (!entry) return;
+
+        // Require reasonable completeness (allow small rounding)
+        if (entry.receivedBytes < entry.meta.size * 0.98) {
+          const errMsg = `Incomplete file: got ${formatBytes(entry.receivedBytes)} of ${formatBytes(entry.meta.size)}`;
+          updateFile(msg.fileId, { status: 'error', error: errMsg });
+          try {
+            await entry.writer.abort();
+          } catch {
+            /* */
+          }
+          writersRef.current.delete(msg.fileId);
+          session?.sendJson({ type: 'transfer-error', message: errMsg });
+          setPhase('failed');
+          setError(errMsg);
+          return;
+        }
+
         try {
           const saved = await entry.writer.finish();
           updateFile(msg.fileId, {
@@ -312,20 +373,31 @@ export default function OfflineSessionScreen() {
           });
           writersRef.current.delete(msg.fileId);
         } catch (e) {
-          updateFile(msg.fileId, {
-            status: 'error',
-            error: e instanceof Error ? e.message : 'Save failed',
-          });
+          const errMsg = e instanceof Error ? e.message : 'Save failed';
+          updateFile(msg.fileId, { status: 'error', error: errMsg });
           try {
             await entry.writer.abort();
           } catch {
             /* */
           }
           writersRef.current.delete(msg.fileId);
+          session?.sendJson({ type: 'transfer-error', message: errMsg });
+          setPhase('failed');
+          setError(errMsg);
         }
       } else if (msg.type === 'transfer-complete') {
-        session?.prepareForMore();
-        setPhase('completed');
+        // Only mark completed if every local file is truly done
+        if (allFilesOk()) {
+          session?.prepareForMore();
+          setPhase('completed');
+        } else {
+          // Peer thinks done but we have errors — stay failed/ready
+          const hasError = queueRef.current.some((f) => f.status === 'error');
+          if (hasError) {
+            setPhase('failed');
+            setError('Transfer finished with errors');
+          }
+        }
       } else if (msg.type === 'transfer-cancelled') {
         cancelledRef.current = true;
         for (const [, entry] of writersRef.current) {
@@ -340,10 +412,10 @@ export default function OfflineSessionScreen() {
         setError('Transfer cancelled');
       } else if (msg.type === 'transfer-error') {
         setPhase('failed');
-        setError(msg.message);
+        setError(msg.message || 'Transfer error');
       }
     },
-    [updateFile, runSend]
+    [updateFile, runSend, allFilesOk, bytesTotal]
   );
 
   useEffect(() => {
@@ -378,9 +450,11 @@ export default function OfflineSessionScreen() {
     try {
       const result = await DocumentPicker.getDocumentAsync({
         multiple: true,
-        copyToCacheDirectory: true, // still needed for reliable reading on many Android versions
+        copyToCacheDirectory: true,
       });
       if (result.canceled || !result.assets?.length) return;
+
+      const displayName = await getDisplayName();
 
       const files: QueuedFile[] = result.assets.map((a) => ({
         id: randomId(),
@@ -392,7 +466,6 @@ export default function OfflineSessionScreen() {
         progress: 0,
       }));
 
-      // Guard against absurd sizes early
       const tooBig = files.find((f) => f.size > MAX_FILE_SIZE);
       if (tooBig) {
         Alert.alert('File too large', `"${tooBig.name}" exceeds the 200 GB limit.`);
@@ -402,6 +475,8 @@ export default function OfflineSessionScreen() {
       setQueue(files);
       queueRef.current = files;
       setError(null);
+      setBytesDone(0);
+      bytesDoneRef.current = 0;
 
       const metas: FileMeta[] = files.map((f) => ({
         id: f.id,
@@ -416,7 +491,7 @@ export default function OfflineSessionScreen() {
         type: 'transfer-offer',
         files: metas,
         totalSize,
-        senderName: 'Android Device',
+        senderName: displayName,
       });
       if (!ok) {
         setError('Channel not ready');
@@ -433,6 +508,8 @@ export default function OfflineSessionScreen() {
     setOffer(null);
     setPhase('transferring');
     startTimeRef.current = Date.now();
+    setBytesDone(0);
+    bytesDoneRef.current = 0;
   }
 
   function rejectOffer() {
@@ -446,10 +523,15 @@ export default function OfflineSessionScreen() {
     queueRef.current = [];
     setOffer(null);
     setBytesDone(0);
+    bytesDoneRef.current = 0;
     setBytesTotal(0);
     setSpeed(0);
     setError(null);
     cancelledRef.current = false;
+    startTimeRef.current = 0;
+    for (const [, entry] of writersRef.current) {
+      entry.writer.abort().catch(() => {});
+    }
     writersRef.current.clear();
     getOfflineSession()?.prepareForMore();
     setPhase('ready');
@@ -460,8 +542,8 @@ export default function OfflineSessionScreen() {
     Alert.alert(
       'Leave this room?',
       transferring
-        ? 'A file transfer is in progress. Leaving will cancel the transfer. The connection will be closed.'
-        : 'The current connection will be closed. QR code and passcode will become invalid.',
+        ? 'A file transfer is in progress. Leaving will cancel the transfer.'
+        : 'The current connection will be closed.',
       [
         { text: 'Stay', style: 'cancel' },
         {
@@ -489,10 +571,12 @@ export default function OfflineSessionScreen() {
   const progress =
     bytesTotal > 0 ? Math.min(100, Math.round((bytesDone / bytesTotal) * 100)) : 0;
 
+  const hasErrors = queue.some((f) => f.status === 'error');
+
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.content}>
       <Text style={styles.title}>Connected</Text>
-      <Text style={styles.peer}>Peer: {peerName}</Text>
+      <Text style={styles.peer}>Peer: {peerName || 'Unknown'}</Text>
       {!!roomCode && <Text style={styles.code}>Room {roomCode}</Text>}
       <Text style={styles.wifiHint}>Same Wi‑Fi / hotspot · no internet needed</Text>
 
@@ -508,7 +592,10 @@ export default function OfflineSessionScreen() {
 
       {phase === 'offering' && offer && (
         <View style={styles.offerBox}>
-          <Text style={styles.offerTitle}>{offer.senderName} wants to send:</Text>
+          <Text style={styles.offerTitle}>
+            <Text style={{ fontWeight: '700', color: '#fff' }}>{offer.senderName}</Text>
+            {' wants to send:'}
+          </Text>
           {offer.files.map((f) => (
             <Text key={f.id} style={styles.fileLine}>
               {f.name} ({formatBytes(f.size)})
@@ -539,7 +626,7 @@ export default function OfflineSessionScreen() {
         </View>
       )}
 
-      {phase === 'completed' && (
+      {phase === 'completed' && !hasErrors && (
         <View style={styles.center}>
           <Text style={styles.done}>Files transferred successfully</Text>
           <Text style={styles.hint}>Send or receive more files</Text>
@@ -557,6 +644,15 @@ export default function OfflineSessionScreen() {
         </View>
       )}
 
+      {phase === 'failed' && (
+        <View style={styles.center}>
+          <Text style={styles.failedTitle}>Transfer failed</Text>
+          <Pressable style={styles.primaryBtn} onPress={resetForMore}>
+            <Text style={styles.primaryBtnText}>Try Again</Text>
+          </Pressable>
+        </View>
+      )}
+
       {queue.length > 0 && (
         <View style={styles.list}>
           {queue.map((f) => (
@@ -568,10 +664,13 @@ export default function OfflineSessionScreen() {
                 <Text style={styles.fileMeta}>
                   {f.status === 'completed'
                     ? `Saved · ${f.displayPath || f.name}`
-                    : `${f.status} · ${f.progress}% · ${formatBytes(f.size)}`}
+                    : f.status === 'error'
+                      ? `Error · ${f.error || 'failed'}`
+                      : `${f.status} · ${f.progress}% · ${formatBytes(f.size)}`}
                 </Text>
               </View>
               {f.status === 'completed' && <Text style={styles.savedBadge}>Saved</Text>}
+              {f.status === 'error' && <Text style={styles.errorBadge}>Error</Text>}
             </View>
           ))}
         </View>
@@ -617,7 +716,7 @@ const styles = StyleSheet.create({
     padding: 20,
     marginBottom: 16,
   },
-  offerTitle: { color: '#fff', fontWeight: '600', marginBottom: 12 },
+  offerTitle: { color: '#ccc', marginBottom: 12 },
   fileLine: { color: '#ccc', marginBottom: 4 },
   total: { color: '#888', marginTop: 8, marginBottom: 16 },
   row: { flexDirection: 'row', gap: 12 },
@@ -660,6 +759,7 @@ const styles = StyleSheet.create({
   fileName: { color: '#fff', fontSize: 14 },
   fileMeta: { color: '#888', fontSize: 12, marginTop: 2 },
   savedBadge: { color: '#22c55e', fontWeight: '600', fontSize: 12 },
+  errorBadge: { color: '#ef4444', fontWeight: '600', fontSize: 12 },
   error: { color: '#ef4444', textAlign: 'center', marginTop: 16 },
   endBtn: {
     marginTop: 32,
@@ -671,4 +771,5 @@ const styles = StyleSheet.create({
   },
   endText: { color: '#ef4444', fontWeight: '600' },
   done: { color: '#22c55e', fontWeight: '700', fontSize: 18, marginBottom: 8 },
+  failedTitle: { color: '#ef4444', fontWeight: '700', fontSize: 18, marginBottom: 12 },
 });

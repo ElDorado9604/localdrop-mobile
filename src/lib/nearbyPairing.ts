@@ -1,6 +1,6 @@
 /**
  * Connect nearby — automatic WebRTC signaling on the same Wi‑Fi / hotspot.
- * Uses UDP. Prefers unicast after first contact for better hotspot support.
+ * UDP with broadcast + unicast preference for better hotspot support.
  */
 import dgram from 'react-native-udp';
 import type { Socket } from 'react-native-udp';
@@ -62,6 +62,18 @@ function safeName(n?: string): string {
   return t.length > 0 ? t.slice(0, 40) : 'Device';
 }
 
+/** Common hotspot / LAN directed broadcast addresses to try. */
+function directedTargets(): string[] {
+  return [
+    '255.255.255.255',
+    '192.168.43.255', // common Android hotspot subnet
+    '192.168.137.255', // Windows hotspot
+    '192.168.0.255',
+    '192.168.1.255',
+    '10.0.0.255',
+  ];
+}
+
 export type NearbyHostResult = {
   answerRaw: string;
   peerName: string;
@@ -78,6 +90,7 @@ export function startNearbyHost(opts: {
   return new Promise((resolve, reject) => {
     let socket: Socket | null = null;
     let timer: ReturnType<typeof setInterval> | null = null;
+    let timeout: ReturnType<typeof setTimeout> | null = null;
     let done = false;
     const id = makeId();
     const hostName = safeName(opts.name);
@@ -85,10 +98,13 @@ export function startNearbyHost(opts: {
       name: hostName,
       code: opts.code,
     });
+    const targets = directedTargets();
 
     const stop = () => {
       if (timer) clearInterval(timer);
+      if (timeout) clearTimeout(timeout);
       timer = null;
+      timeout = null;
       try {
         socket?.close();
       } catch {
@@ -108,16 +124,36 @@ export function startNearbyHost(opts: {
           /* */
         }
         opts.onStatus?.('Broadcasting to nearby devices…');
+        let tick = 0;
         timer = setInterval(() => {
+          tick++;
           for (const c of chunks) {
             const buf = JSON.stringify(c);
-            try {
-              socket?.send(buf, 0, buf.length, PORT, '255.255.255.255');
-            } catch {
-              /* */
+            for (const addr of targets) {
+              try {
+                socket?.send(buf, 0, buf.length, PORT, addr);
+              } catch {
+                /* */
+              }
             }
           }
-        }, 700);
+          if (tick === 8) {
+            opts.onStatus?.('Still waiting… If using hotspot, keep both screens on.');
+          }
+        }, 600);
+
+        // Give up after ~45s so UI can show a clear error
+        timeout = setTimeout(() => {
+          if (!done) {
+            done = true;
+            stop();
+            reject(
+              new Error(
+                'No device joined. Stay on the same Wi‑Fi/hotspot, keep screens on, or use QR instead.'
+              )
+            );
+          }
+        }, 45000);
       });
 
       const answerParts = new Map<string, Map<number, string>>();
@@ -184,9 +220,12 @@ export function startNearbyGuest(opts: {
 }): Promise<NearbyGuestResult> {
   return new Promise((resolve, reject) => {
     let socket: Socket | null = null;
+    let timeout: ReturnType<typeof setTimeout> | null = null;
     let done = false;
 
     const stop = () => {
+      if (timeout) clearTimeout(timeout);
+      timeout = null;
       try {
         socket?.close();
       } catch {
@@ -199,6 +238,18 @@ export function startNearbyGuest(opts: {
       socket = dgram.createSocket({ type: 'udp4' });
       socket.bind(PORT);
       opts.onStatus?.('Looking for nearby room…');
+
+      timeout = setTimeout(() => {
+        if (!done) {
+          done = true;
+          stop();
+          reject(
+            new Error(
+              'No room found. Same Wi‑Fi/hotspot required. Keep screens on, or use QR.'
+            )
+          );
+        }
+      }, 40000);
 
       const offerParts = new Map<string, Map<number, string>>();
       const offerMeta = new Map<
@@ -230,6 +281,7 @@ export function startNearbyGuest(opts: {
           if (!full) return;
 
           done = true;
+          if (timeout) clearTimeout(timeout);
           const hostAddr = meta.rinfo.address;
 
           resolve({
@@ -247,16 +299,24 @@ export function startNearbyGuest(opts: {
                 for (const c of chunks) {
                   const buf = JSON.stringify(c);
                   try {
-                    // Prefer unicast to host (works better on hotspot)
                     socket?.send(buf, 0, buf.length, PORT, hostAddr);
-                    // Also broadcast as fallback
                     socket?.send(buf, 0, buf.length, PORT, '255.255.255.255');
+                    // Also try common hotspot directed broadcasts
+                    for (const addr of directedTargets()) {
+                      if (addr !== '255.255.255.255') {
+                        try {
+                          socket?.send(buf, 0, buf.length, PORT, addr);
+                        } catch {
+                          /* */
+                        }
+                      }
+                    }
                   } catch {
                     /* */
                   }
                 }
-                if (rounds >= 10) clearInterval(t);
-              }, 350);
+                if (rounds >= 12) clearInterval(t);
+              }, 300);
             },
           });
         } catch {

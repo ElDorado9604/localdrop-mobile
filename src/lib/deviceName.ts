@@ -1,6 +1,6 @@
 /**
  * Friendly device display name for pairing screens.
- * Priority: user-saved name → system deviceName → modelName → fallback.
+ * Priority: user-saved name → system deviceName → modelName → brand+model → fallback.
  */
 import { Platform } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -17,14 +17,34 @@ export async function getDisplayName(): Promise<string> {
   }
 
   // User-assigned name (e.g. "Ashish’s Pixel")
-  const systemName = Device.deviceName?.trim();
-  if (systemName && systemName.length > 1) return systemName.slice(0, 40);
+  try {
+    const systemName = Device.deviceName?.trim();
+    if (systemName && systemName.length > 1 && systemName.toLowerCase() !== 'device') {
+      return systemName.slice(0, 40);
+    }
+  } catch {
+    /* */
+  }
 
-  // Model (e.g. "Pixel 6 Pro")
-  const model = Device.modelName?.trim();
-  if (model) return model.slice(0, 40);
+  // Model (e.g. "Pixel 6 Pro", "motorola edge 50 pro")
+  try {
+    const model = Device.modelName?.trim();
+    if (model && model.length > 1) return model.slice(0, 40);
+  } catch {
+    /* */
+  }
 
-  return Platform.OS === 'ios' ? 'iPhone' : 'Android Device';
+  // Brand + model fallback
+  try {
+    const brand = Device.brand?.trim() || Device.manufacturer?.trim();
+    const model = Device.modelName?.trim();
+    if (brand && model) return `${brand} ${model}`.slice(0, 40);
+    if (brand) return brand.slice(0, 40);
+  } catch {
+    /* */
+  }
+
+  return Platform.OS === 'ios' ? 'iPhone' : 'Android phone';
 }
 
 export async function setDisplayName(name: string): Promise<void> {

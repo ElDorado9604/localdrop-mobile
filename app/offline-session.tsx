@@ -1,6 +1,7 @@
 /**
  * Connected offline room: send / receive / send more / bidirectional.
  * Streaming I/O — supports large files. Strict completion + friendly names.
+ * Sender streams from original URI (no full-file cache copy).
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
@@ -124,7 +125,6 @@ export default function OfflineSessionScreen() {
       return;
     }
 
-    // Include files just marked 'sending' (transfer-accepted path) as well as 'pending'
     const pending = queueRef.current.filter(
       (f) => (f.status === 'pending' || f.status === 'sending') && f.uri
     );
@@ -291,7 +291,6 @@ export default function OfflineSessionScreen() {
           }))
         );
       } else if (msg.type === 'transfer-accepted') {
-        // Mark files as sending immediately so UI does not stay on "pending"
         setQueue((prev) => {
           const next = prev.map((f) =>
             f.status === 'pending' && f.uri
@@ -461,9 +460,11 @@ export default function OfflineSessionScreen() {
     }
 
     try {
+      // Do NOT copy into app cache — stream from the original content:// or file:// URI.
+      // Sender only needs a few MB free, not the full file size.
       const result = await DocumentPicker.getDocumentAsync({
         multiple: true,
-        copyToCacheDirectory: true,
+        copyToCacheDirectory: false,
       });
       if (result.canceled || !result.assets?.length) return;
 
@@ -510,7 +511,6 @@ export default function OfflineSessionScreen() {
         setError('Channel not ready');
         return;
       }
-      // Waiting for peer to accept — show as pending until transfer-accepted
       setPhase('transferring');
     } catch {
       Alert.alert('Error', 'Could not pick files');

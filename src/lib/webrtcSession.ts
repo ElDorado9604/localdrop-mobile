@@ -1,6 +1,6 @@
 /**
  * Manages a single WebRTC peer connection + data channel for LocalDrop.
- * Signaling is done externally (Socket.IO for online, or QR for offline).
+ * Signaling is done externally (Socket.IO for online, or QR/nearby for offline).
  */
 
 import {
@@ -14,9 +14,8 @@ import { waitForIceComplete } from './offlineSignal';
 
 type SignalHandler = (type: 'offer' | 'answer' | 'ice-candidate', payload: any) => void;
 
-// Allow more in-flight data before pausing (higher throughput on LAN)
 const BUFFER_HIGH = 1024 * 1024; // 1 MB
-const BUFFER_LOW = 256 * 1024; // resume under 256 KB
+const BUFFER_LOW = 256 * 1024;
 
 export class WebRTCSession {
   private pc: any = null;
@@ -24,6 +23,7 @@ export class WebRTCSession {
   private pendingIce: any[] = [];
   private remoteSet = false;
   private completed = false;
+  private closedNotified = false;
   private onSignal: SignalHandler;
   private onOpen: (() => void) | null = null;
   private onMessage: ((data: ArrayBuffer | string) => void) | null = null;
@@ -51,14 +51,26 @@ export class WebRTCSession {
     return isWebRTCAvailable();
   }
 
+  private notifyClosed() {
+    if (this.closedNotified) return;
+    this.closedNotified = true;
+    this.onClose?.();
+  }
+
+  private notifyFailed(reason: string) {
+    if (this.completed || this.closedNotified) return;
+    this.closedNotified = true;
+    this.onFailed?.(reason);
+  }
+
   private wireChannel(channel: any) {
     this.channel = channel;
     channel.binaryType = 'arraybuffer';
 
     channel.onopen = () => this.onOpen?.();
-    channel.onclose = () => this.onClose?.();
+    channel.onclose = () => this.notifyClosed();
     channel.onerror = () => {
-      if (!this.completed) this.onFailed?.('Data channel error');
+      this.notifyFailed('Data channel error');
     };
     channel.onmessage = (event: any) => {
       this.onMessage?.(event.data);
@@ -75,13 +87,31 @@ export class WebRTCSession {
         this.onSignal('ice-candidate', candidate.toJSON ? candidate.toJSON() : candidate);
       },
       (state) => {
-        if (state === 'failed' && !this.completed) {
-          this.onFailed?.(
+        // iceConnectionState from createPeerConnection callback
+        if (state === 'failed') {
+          this.notifyFailed(
             'Could not establish a direct link. Put both devices on the same Wi-Fi and try again.'
           );
+        } else if (state === 'disconnected' || state === 'closed') {
+          // Peer left / link dropped — surface as close so UI leaves "Connected"
+          this.notifyClosed();
         }
       }
     );
+
+    // Also watch connectionState (more reliable for peer leave on some devices)
+    try {
+      this.pc.addEventListener?.('connectionstatechange', () => {
+        const st = this.pc?.connectionState;
+        if (st === 'failed') {
+          this.notifyFailed('Connection failed. Reconnect both devices.');
+        } else if (st === 'disconnected' || st === 'closed') {
+          this.notifyClosed();
+        }
+      });
+    } catch {
+      /* */
+    }
 
     if (asInitiator) {
       const ch = createDataChannel(this.pc);
@@ -140,7 +170,10 @@ export class WebRTCSession {
   }
 
   async handleIce(candidate: any) {
-    if (!candidate || (!candidate.candidate && !candidate.sdpMid && candidate.sdpMLineIndex == null)) {
+    if (
+      !candidate ||
+      (!candidate.candidate && !candidate.sdpMid && candidate.sdpMLineIndex == null)
+    ) {
       return;
     }
     if (!this.pc || !this.remoteSet) {
@@ -176,15 +209,18 @@ export class WebRTCSession {
   sendJson(msg: object): boolean {
     const ch = this.channel;
     if (!ch || ch.readyState !== 'open') return false;
-    ch.send(JSON.stringify(msg));
-    return true;
+    try {
+      ch.send(JSON.stringify(msg));
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   async sendBinary(data: ArrayBuffer) {
     const ch = this.channel;
     if (!ch || ch.readyState !== 'open') throw new Error('Channel closed');
 
-    // Wait only when buffer is truly high — allows pipelining for speed
     while ((ch.bufferedAmount ?? 0) > BUFFER_HIGH) {
       await new Promise<void>((resolve) => {
         let settled = false;
@@ -204,9 +240,9 @@ export class WebRTCSession {
         } catch {
           /* */
         }
-        // Fallback poll
         setTimeout(done, 20);
       });
+      if (ch.readyState !== 'open') throw new Error('Channel closed');
     }
     ch.send(data);
   }
@@ -217,10 +253,13 @@ export class WebRTCSession {
 
   prepareForMore() {
     this.completed = false;
+    this.closedNotified = false;
   }
 
   close() {
     this.completed = true;
+    // Do not notify closed to local handlers when we intentionally leave
+    // (remote peer still gets channel/pc close events).
     try {
       this.channel?.close();
     } catch {

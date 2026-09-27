@@ -3,14 +3,14 @@
  * User picks or creates the folder themselves — we never create a subfolder.
  * No second copy in app-private Documents.
  *
- * Large files (>~50 MB) must use the streaming writer (createStreamingWriter)
- * so we never hold the full file in JS memory.
+ * Large files use createStreamingWriter → direct write into SAF / destination
+ * (no full temp cache copy). Receiver needs ~file size free, not 2×.
  */
 
 import { Platform } from 'react-native';
 import * as FileSystem from 'expo-file-system/legacy';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { createReceivedFileWriter, type ReceivedFileWriter } from './fileStream';
+import { createDirectReceivedWriter, type ReceivedFileWriter } from './fileStream';
 
 const SAVE_DIR_KEY = 'localdrop_public_save_dir_uri';
 const SAVE_LABEL_KEY = 'localdrop_public_save_label';
@@ -265,24 +265,22 @@ export async function saveReceivedFile(
 
 /**
  * Preferred path for any file that may be large.
- * Streams chunks to a temp file, then moves into the public LocalDrop folder.
- * Memory usage stays constant.
+ * Streams chunks directly into the public LocalDrop / SAF folder.
+ * No full temp copy in app cache when FileHandle works (normal case).
  */
 export async function createStreamingWriter(
   fileName: string,
   mime?: string,
   sizeHint?: number
 ): Promise<ReceivedFileWriter> {
-  const writer = await createReceivedFileWriter(
+  const writer = await createDirectReceivedWriter(
     fileName,
     mime,
     sizeHint ?? 0,
-    saveReceivedFile,
     getSaveDirectoryUri,
     getSaveDirectoryLabel
   );
 
-  // Wrap finish so we also add the index entry
   const originalFinish = writer.finish.bind(writer);
   writer.finish = async () => {
     const result = await originalFinish();

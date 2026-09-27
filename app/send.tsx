@@ -81,9 +81,10 @@ export default function SendScreen() {
 
   async function pickFiles() {
     try {
+      // Stream from original URI — sender does not need free space ≈ file size
       const result = await DocumentPicker.getDocumentAsync({
         multiple: true,
-        copyToCacheDirectory: true,
+        copyToCacheDirectory: false,
       });
       if (result.canceled) return;
       const picked: FileInfo[] = result.assets.map((a) => ({
@@ -105,7 +106,6 @@ export default function SendScreen() {
 
   async function startSending() {
     if (isOffline) {
-      // Offline: pair first (files chosen in the persistent session)
       router.push('/offline-host');
       return;
     }

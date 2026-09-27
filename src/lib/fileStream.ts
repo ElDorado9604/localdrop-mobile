@@ -1,18 +1,16 @@
 /**
  * Memory-safe chunked file I/O for LocalDrop.
- * Avoids loading entire files into JS (fixes OOM on multi-GB transfers).
- * Uses modern expo-file-system FileHandle when possible; falls back to
- * legacy position/length Base64 reads for content:// URIs.
+ * Never loads the whole file into JS memory.
+ * Sender can stream from content:// / file:// without copying into app cache.
  */
 
 import * as FileSystemLegacy from 'expo-file-system/legacy';
-import { File, Paths, FileMode } from 'expo-file-system';
+import { File, FileMode } from 'expo-file-system';
 import { Platform } from 'react-native';
 import { CHUNK_SIZE } from './transferProtocol';
 
-const READ_CHUNK = CHUNK_SIZE; // 64 KB — safe for WebRTC + JS heap
+const READ_CHUNK = CHUNK_SIZE; // matches transfer chunk size (256 KB)
 
-/** Convert small Base64 string → ArrayBuffer without holding huge strings. */
 function base64ToArrayBuffer(b64: string): ArrayBuffer {
   const binary = atob(b64);
   const len = binary.length;
@@ -22,8 +20,8 @@ function base64ToArrayBuffer(b64: string): ArrayBuffer {
 }
 
 /**
- * Stream a file in binary chunks. Never loads the whole file into memory.
- * Works with file:// and most content:// URIs.
+ * Stream a file in binary chunks. Constant memory.
+ * Works with file:// and content:// (SAF) URIs — no full-file cache copy required.
  */
 export async function streamFileChunks(
   uri: string,
@@ -31,7 +29,7 @@ export async function streamFileChunks(
   onChunk: (chunk: ArrayBuffer, offset: number, index: number) => Promise<void>,
   signal?: { cancelled: boolean }
 ): Promise<void> {
-  // Prefer modern FileHandle (supports >2GB offsets correctly)
+  // Prefer modern FileHandle (supports large offsets)
   try {
     const file = new File(uri);
     if (typeof file.open === 'function') {
@@ -45,7 +43,11 @@ export async function streamFileChunks(
           const toRead = Math.min(READ_CHUNK, fileSize - offset);
           const data = await handle.readBytes(toRead);
           if (!data || data.byteLength === 0) break;
-          await onChunk(data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength), offset, index);
+          await onChunk(
+            data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength),
+            offset,
+            index
+          );
           offset += data.byteLength;
           index++;
           handle.offset = offset;
@@ -63,7 +65,7 @@ export async function streamFileChunks(
     // Fall through to legacy path
   }
 
-  // Legacy path: position + length (Base64). Safe for <2GB; may have issues above 2GB on older Android.
+  // Legacy: position + length Base64 reads (works on content:// without full copy)
   let offset = 0;
   let index = 0;
   while (offset < fileSize) {
@@ -89,9 +91,8 @@ export type ReceivedFileWriter = {
 };
 
 /**
- * Create a writer that streams binary chunks to a temp cache file,
- * then moves the completed file into the user's public LocalDrop folder.
- * Memory stays constant regardless of file size.
+ * Stream binary chunks to a temp cache file, then move into public LocalDrop folder.
+ * Receiver still needs ~file size free space for the final save.
  */
 export async function createReceivedFileWriter(
   fileName: string,
@@ -110,7 +111,6 @@ export async function createReceivedFileWriter(
   const cacheDir = FileSystemLegacy.cacheDirectory || FileSystemLegacy.documentDirectory || '';
   const tempUri = `${cacheDir}localdrop_tmp_${Date.now()}_${Math.random().toString(36).slice(2, 8)}_${safeName}`;
 
-  // Create empty temp file
   await FileSystemLegacy.writeAsStringAsync(tempUri, '', {
     encoding: FileSystemLegacy.EncodingType.UTF8,
   });
@@ -118,7 +118,6 @@ export async function createReceivedFileWriter(
   let written = 0;
   let aborted = false;
 
-  // Prefer modern FileHandle for append-style writes
   let handle: any = null;
   try {
     const file = new File(tempUri);
@@ -139,16 +138,12 @@ export async function createReceivedFileWriter(
         await handle.writeBytes(bytes);
         handle.offset = (handle.offset ?? 0) + bytes.byteLength;
       } else {
-        // Fallback: append via Base64 (only for smaller files; still better than full-file)
-        const b64 = btoa(String.fromCharCode(...bytes));
-        // Legacy has no true append for binary; we re-read is too expensive.
-        // For safety on huge files we rely on modern handle.
-        // If we reach here on very large files, fail early.
         if (written + bytes.byteLength > 80 * 1024 * 1024) {
           throw new Error(
-            'Large-file write requires modern expo-file-system FileHandle. Please rebuild the app with latest Expo SDK.'
+            'Large-file write requires modern expo-file-system FileHandle. Please rebuild the app.'
           );
         }
+        const b64 = btoa(String.fromCharCode(...bytes));
         const existing = await FileSystemLegacy.readAsStringAsync(tempUri, {
           encoding: FileSystemLegacy.EncodingType.Base64,
         }).catch(() => '');
@@ -167,8 +162,6 @@ export async function createReceivedFileWriter(
         /* */
       }
 
-      // Move temp → public folder using existing save logic.
-      // We read the temp file in Base64 only if small; for large we copy via native.
       const dirUri = await getSaveDirectoryUri();
       if (!dirUri) {
         throw new Error('Save folder not set. Open Home and choose a folder first.');
@@ -178,19 +171,15 @@ export async function createReceivedFileWriter(
       const mimeType = mime || 'application/octet-stream';
 
       if (Platform.OS === 'android' && dirUri.startsWith('content://')) {
-        // Create target via SAF, then copy bytes natively
         const targetUri = await FileSystemLegacy.StorageAccessFramework.createFileAsync(
           dirUri,
           safeName,
           mimeType
         );
         await FileSystemLegacy.copyAsync({ from: tempUri, to: targetUri });
-        // Clean temp
         await FileSystemLegacy.deleteAsync(tempUri, { idempotent: true }).catch(() => {});
 
-        // Index entry (reuse logic via a minimal record)
         const id = `${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 9)}`;
-        // Caller will add to index; we return the paths
         return {
           path: targetUri,
           displayPath: `${label}/${safeName}`,
@@ -198,7 +187,6 @@ export async function createReceivedFileWriter(
         };
       }
 
-      // Non-SAF (iOS / file://)
       const destDir = dirUri.endsWith('/') ? dirUri : dirUri + '/';
       let dest = destDir + safeName;
       try {

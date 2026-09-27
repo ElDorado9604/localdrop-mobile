@@ -104,11 +104,10 @@ export default function OfflineSessionScreen() {
   }, [phase]);
 
   const updateFile = useCallback((id: string, patch: Partial<QueuedFile>) => {
-    setQueue((prev) => {
-      const next = prev.map((f) => (f.id === id ? { ...f, ...patch } : f));
-      queueRef.current = next;
-      return next;
-    });
+    // Sync ref immediately so runSend / allFilesOk never race setState
+    const next = queueRef.current.map((f) => (f.id === id ? { ...f, ...patch } : f));
+    queueRef.current = next;
+    setQueue(next);
   }, []);
 
   const allFilesOk = useCallback(() => {
@@ -145,6 +144,7 @@ export default function OfflineSessionScreen() {
     setBytesDone(0);
     const total = pending.reduce((s, f) => s + f.size, 0);
     setBytesTotal(total);
+    const completedIds: string[] = [];
 
     for (let i = 0; i < pending.length; i++) {
       if (cancelledRef.current) break;
@@ -199,6 +199,7 @@ export default function OfflineSessionScreen() {
 
         session.sendJson({ type: 'file-complete', fileId: item.id });
         updateFile(item.id, { status: 'completed', progress: 100 });
+        completedIds.push(item.id);
       } catch (e) {
         const msg = e instanceof Error ? e.message : 'File transfer failed';
         updateFile(item.id, { status: 'error', error: msg });
@@ -209,16 +210,19 @@ export default function OfflineSessionScreen() {
       }
     }
 
-    if (!cancelledRef.current && allFilesOk()) {
+    if (cancelledRef.current) return;
+
+    // Use local completedIds — do not rely on setState timing
+    if (completedIds.length === pending.length) {
       session.sendJson({ type: 'transfer-complete' });
       session.prepareForMore();
       setPhase('completed');
       setBytesDone(total);
-    } else if (!cancelledRef.current) {
+    } else {
       setPhase('failed');
       setError('Transfer did not complete successfully');
     }
-  }, [updateFile, allFilesOk]);
+  }, [updateFile]);
 
   const handleProtocol = useCallback(
     async (data: ArrayBuffer | string) => {
@@ -423,6 +427,11 @@ export default function OfflineSessionScreen() {
         setPhase('ready');
         setError('Transfer cancelled');
       } else if (msg.type === 'transfer-error') {
+        cancelledRef.current = true;
+        for (const [, entry] of writersRef.current) {
+          entry.writer.abort().catch(() => {});
+        }
+        writersRef.current.clear();
         setPhase('failed');
         setError(msg.message || 'Transfer error');
       }
@@ -442,10 +451,20 @@ export default function OfflineSessionScreen() {
     session.setHandlers({
       onMessage: (data) => void handleProtocol(data),
       onClose: () => {
+        cancelledRef.current = true;
+        for (const [, entry] of writersRef.current) {
+          entry.writer.abort().catch(() => {});
+        }
+        writersRef.current.clear();
         setError('The other device has left the room.');
         setPhase('failed');
       },
       onFailed: (reason) => {
+        cancelledRef.current = true;
+        for (const [, entry] of writersRef.current) {
+          entry.writer.abort().catch(() => {});
+        }
+        writersRef.current.clear();
         setError(reason);
         setPhase('failed');
       },
@@ -460,8 +479,6 @@ export default function OfflineSessionScreen() {
     }
 
     try {
-      // Do NOT copy into app cache — stream from the original content:// or file:// URI.
-      // Sender only needs a few MB free, not the full file size.
       const result = await DocumentPicker.getDocumentAsync({
         multiple: true,
         copyToCacheDirectory: false,
@@ -574,8 +591,10 @@ export default function OfflineSessionScreen() {
               entry.writer.abort().catch(() => {});
             }
             writersRef.current.clear();
-            clearOfflineSession();
-            router.replace('/offline');
+            setTimeout(() => {
+              clearOfflineSession();
+              router.replace('/offline');
+            }, 150);
           },
         },
       ]
@@ -678,13 +697,17 @@ export default function OfflineSessionScreen() {
                 </Text>
                 <Text style={styles.fileMeta}>
                   {f.status === 'completed'
-                    ? `Saved · ${f.displayPath || f.name}`
+                    ? f.uri
+                      ? `Sent · ${formatBytes(f.size)}`
+                      : `Saved · ${f.displayPath || f.name}`
                     : f.status === 'error'
                       ? `Error · ${f.error || 'failed'}`
                       : `${f.status} · ${f.progress}% · ${formatBytes(f.size)}`}
                 </Text>
               </View>
-              {f.status === 'completed' && <Text style={styles.savedBadge}>Saved</Text>}
+              {f.status === 'completed' && (
+                <Text style={styles.savedBadge}>{f.uri ? 'Sent' : 'Saved'}</Text>
+              )}
               {f.status === 'error' && <Text style={styles.errorBadge}>Error</Text>}
             </View>
           ))}

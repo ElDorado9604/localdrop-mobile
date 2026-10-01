@@ -17,7 +17,7 @@ import {
 } from '../src/lib/socket';
 import { WebRTCSession } from '../src/lib/webrtcSession';
 import {
-  CHUNK_SIZE,
+  ONLINE_CHUNK_SIZE,
   ProtocolMessage,
   FileMeta,
   formatBytes,
@@ -175,7 +175,7 @@ export default function TransferScreen() {
       });
 
       try {
-        const totalChunks = Math.ceil(item.size / CHUNK_SIZE) || 1;
+        const totalChunks = Math.ceil(item.size / ONLINE_CHUNK_SIZE) || 1;
         let sent = 0;
 
         await streamFileChunks(
@@ -194,7 +194,8 @@ export default function TransferScreen() {
             const elapsed = (Date.now() - startTimeRef.current) / 1000;
             if (elapsed > 0.25) setSpeed(done / elapsed);
           },
-          { cancelled: cancelledRef.current }
+          { cancelled: cancelledRef.current },
+          ONLINE_CHUNK_SIZE
         );
 
         session.sendJson({ type: 'file-complete', fileId: item.id });
@@ -319,7 +320,7 @@ export default function TransferScreen() {
         setPhase('failed');
         setError('Receiver declined the transfer.');
       } else if (msg.type === 'file-start') {
-        const totalChunks = Math.ceil(msg.size / CHUNK_SIZE) || 1;
+        const totalChunks = Math.ceil(msg.size / ONLINE_CHUNK_SIZE) || 1;
 
         if (!(await ensureWritableSaveDirectory())) {
           const ok = await setupPublicSaveFolder();
@@ -374,7 +375,6 @@ export default function TransferScreen() {
         const entry = writersRef.current.get(msg.fileId);
         if (!entry) return;
 
-        // Drain: wait for in-flight chunks (and late arrivals) to catch up to declared size
         const target = entry.meta.size;
         const deadline = Date.now() + 8000;
         while (Date.now() < deadline) {
@@ -384,7 +384,6 @@ export default function TransferScreen() {
           );
           entry.receivedBytes = written;
           if (written >= target) break;
-          // Close enough for rounding / last tiny chunk already applied
           if (target > 0 && written / target >= 0.999) break;
           await new Promise((r) => setTimeout(r, 40));
         }

@@ -1,0 +1,15 @@
+{
+  "name": "saf-stream",
+  "version": "1.0.0",
+  "description": "Android SAF OutputStream writer for LocalDrop large-file receives",
+  "main": "index.ts",
+  "types": "index.ts",
+  "scripts": {},
+  "keywords": ["expo", "saf", "android"],
+  "license": "MIT",
+  "peerDependencies": {
+    "expo": "*",
+    "react": "*",
+    "react-native": "*"
+  }
+}

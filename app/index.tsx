@@ -8,6 +8,7 @@ import {
   Platform,
   Alert,
   Image,
+  ActivityIndicator,
 } from 'react-native';
 import { Link, useFocusEffect, useRouter } from 'expo-router';
 import {
@@ -15,6 +16,8 @@ import {
   setupPublicSaveFolder,
   hasSaveDirectory,
   getSaveDirectoryLabel,
+  ensureWritableSaveDirectory,
+  testSaveFolder,
   type ReceivedFileRecord,
 } from '../src/lib/saveReceivedFile';
 
@@ -68,12 +71,25 @@ export default function HomeScreen() {
   const [recent, setRecent] = useState<ReceivedFileRecord[]>([]);
   const [totalCount, setTotalCount] = useState(0);
   const [hasFolder, setHasFolder] = useState(false);
+  const [folderOk, setFolderOk] = useState(false);
   const [folderLabel, setFolderLabel] = useState('LocalDrop');
+  const [testing, setTesting] = useState(false);
   const router = useRouter();
 
   const refresh = useCallback(async () => {
-    setHasFolder(await hasSaveDirectory());
+    const has = await hasSaveDirectory();
+    setHasFolder(has);
     setFolderLabel(await getSaveDirectoryLabel());
+    if (has) {
+      const writable = await ensureWritableSaveDirectory();
+      setFolderOk(writable);
+      if (!writable) {
+        setHasFolder(false);
+        setFolderLabel('LocalDrop');
+      }
+    } else {
+      setFolderOk(false);
+    }
     const list = await listReceivedFiles();
     setTotalCount(list.length);
     setRecent(list.slice(0, 5));
@@ -88,7 +104,7 @@ export default function HomeScreen() {
   async function chooseFolder() {
     Alert.alert(
       'Save folder',
-      'In the system picker, create a folder named LocalDrop (or pick an existing one). We will save files only into the folder you select — we do not create folders ourselves.',
+      'In the system picker, create a folder named LocalDrop (or pick an existing one). We only save into the folder you select.',
       [
         { text: 'Cancel', style: 'cancel' },
         {
@@ -96,15 +112,47 @@ export default function HomeScreen() {
           onPress: async () => {
             const ok = await setupPublicSaveFolder();
             if (ok) {
-              Alert.alert('Ready', 'Received files will be saved to the folder you selected.');
+              Alert.alert('Folder OK', 'Write test passed. Ready to receive files.');
               await refresh();
             } else {
-              Alert.alert('Not set', 'Folder permission was not granted.');
+              Alert.alert(
+                'Not writable',
+                'Could not write to that folder. Pick LocalDrop again and allow access.'
+              );
+              await refresh();
             }
           },
         },
       ]
     );
+  }
+
+  async function runFolderTest() {
+    setTesting(true);
+    try {
+      const result = await testSaveFolder();
+      if (result.ok) {
+        Alert.alert('Folder OK', result.message);
+      } else {
+        Alert.alert('Folder test failed', result.message);
+      }
+      await refresh();
+    } finally {
+      setTesting(false);
+    }
+  }
+
+  function requireFolderOrAlert(): boolean {
+    if (folderOk) return true;
+    Alert.alert(
+      'Set a writable save folder',
+      'Choose a folder and confirm the write test passes before receiving files.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Choose folder', onPress: () => void chooseFolder() },
+      ]
+    );
+    return false;
   }
 
   return (
@@ -114,20 +162,46 @@ export default function HomeScreen() {
         Fast peer-to-peer file transfer on the same network
       </Text>
 
-      <View style={[styles.folderBanner, !hasFolder && styles.folderBannerWarn]}>
+      <View
+        style={[
+          styles.folderBanner,
+          !hasFolder || !folderOk ? styles.folderBannerWarn : styles.folderBannerOk,
+        ]}
+      >
         <Text style={styles.folderBannerTitle}>
-          {hasFolder ? `Saving to: ${folderLabel}` : 'Save folder not set'}
+          {!hasFolder
+            ? 'Save folder not set'
+            : folderOk
+              ? `Folder OK · ${folderLabel}`
+              : `Cannot write · ${folderLabel}`}
         </Text>
         <Text style={styles.folderBannerBody}>
-          {hasFolder
-            ? 'Files appear in the system Files app. No duplicate copies.'
-            : 'Create or select a folder in the system picker (e.g. LocalDrop under Downloads). Required before receiving.'}
+          {!hasFolder
+            ? 'Create or select LocalDrop (e.g. under Downloads). Required before receiving.'
+            : folderOk
+              ? 'Write test passed. Received files go here in the system Files app.'
+              : 'Permission may have expired. Choose the folder again.'}
         </Text>
-        <Pressable style={styles.folderBtn} onPress={chooseFolder}>
-          <Text style={styles.folderBtnText}>
-            {hasFolder ? 'Change folder' : 'Choose save folder'}
-          </Text>
-        </Pressable>
+        <View style={styles.folderBtnRow}>
+          <Pressable style={styles.folderBtn} onPress={chooseFolder}>
+            <Text style={styles.folderBtnText}>
+              {hasFolder ? 'Change folder' : 'Choose save folder'}
+            </Text>
+          </Pressable>
+          {hasFolder && (
+            <Pressable
+              style={[styles.folderBtnSecondary, testing && { opacity: 0.6 }]}
+              onPress={() => void runFolderTest()}
+              disabled={testing}
+            >
+              {testing ? (
+                <ActivityIndicator color="#3b82f6" size="small" />
+              ) : (
+                <Text style={styles.folderBtnSecondaryText}>Test save folder</Text>
+              )}
+            </Pressable>
+          )}
+        </View>
       </View>
 
       <View style={styles.modeContainer}>
@@ -153,13 +227,19 @@ export default function HomeScreen() {
         <Text style={styles.modeHint}>
           {mode === 'online'
             ? 'Uses signaling server for code / QR pairing'
-            : 'No internet — Create/Join room with QR or passcode on same Wi‑Fi'}
+            : 'No internet — Create/Join room with QR or nearby on same Wi‑Fi'}
         </Text>
       </View>
 
       <View style={styles.actions}>
         {mode === 'offline' ? (
-          <Pressable style={styles.primaryButton} onPress={() => router.push('/offline')}>
+          <Pressable
+            style={styles.primaryButton}
+            onPress={() => {
+              if (Platform.OS === 'android' && !requireFolderOrAlert()) return;
+              router.push('/offline');
+            }}
+          >
             <Text style={styles.primaryButtonText}>Open Offline Transfer</Text>
           </Pressable>
         ) : (
@@ -174,16 +254,9 @@ export default function HomeScreen() {
               <Pressable
                 style={styles.secondaryButton}
                 onPress={(e) => {
-                  if (!hasFolder && Platform.OS === 'android') {
+                  if (Platform.OS === 'android' && !folderOk) {
                     e.preventDefault?.();
-                    Alert.alert(
-                      'Set save folder first',
-                      'Create or select a folder in the system picker so received files appear in Files.',
-                      [
-                        { text: 'Cancel', style: 'cancel' },
-                        { text: 'Choose folder', onPress: () => void chooseFolder() },
-                      ]
-                    );
+                    requireFolderOrAlert();
                   }
                 }}
               >
@@ -248,12 +321,14 @@ const styles = StyleSheet.create({
     marginBottom: 20,
   },
   folderBanner: {
-    backgroundColor: '#1a2332',
     borderRadius: 14,
     padding: 16,
     marginBottom: 24,
     borderWidth: 1,
-    borderColor: '#334155',
+  },
+  folderBannerOk: {
+    backgroundColor: '#0f1f14',
+    borderColor: '#166534',
   },
   folderBannerWarn: {
     backgroundColor: '#2a2010',
@@ -261,6 +336,7 @@ const styles = StyleSheet.create({
   },
   folderBannerTitle: { color: '#fff', fontWeight: '700', marginBottom: 6 },
   folderBannerBody: { color: '#94a3b8', fontSize: 13, marginBottom: 12, lineHeight: 18 },
+  folderBtnRow: { gap: 8 },
   folderBtn: {
     backgroundColor: '#3b82f6',
     borderRadius: 10,
@@ -268,6 +344,14 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   folderBtnText: { color: '#fff', fontWeight: '600', fontSize: 14 },
+  folderBtnSecondary: {
+    borderRadius: 10,
+    paddingVertical: 10,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: '#3b82f6',
+  },
+  folderBtnSecondaryText: { color: '#3b82f6', fontWeight: '600', fontSize: 14 },
   modeContainer: { marginBottom: 28 },
   modeLabel: {
     color: '#fff',

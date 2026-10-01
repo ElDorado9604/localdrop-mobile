@@ -1,4 +1,12 @@
-export const CHUNK_SIZE = 256 * 1024; // 256 KB — better throughput on LAN/hotspot
+/** Online (web ↔ mobile): match web app 64 KB chunks */
+export const ONLINE_CHUNK_SIZE = 64 * 1024;
+
+/** Offline (mobile ↔ mobile LAN/hotspot): larger chunks for throughput */
+export const OFFLINE_CHUNK_SIZE = 256 * 1024;
+
+/** @deprecated Prefer ONLINE_CHUNK_SIZE or OFFLINE_CHUNK_SIZE */
+export const CHUNK_SIZE = OFFLINE_CHUNK_SIZE;
+
 export const MAX_FILE_SIZE = 200 * 1024 * 1024 * 1024; // 200 GB theoretical max (streaming required)
 
 export type FileMeta = {

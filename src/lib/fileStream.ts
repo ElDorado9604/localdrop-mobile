@@ -8,7 +8,7 @@
 import * as FileSystemLegacy from 'expo-file-system/legacy';
 import { File, FileMode } from 'expo-file-system';
 import { Platform } from 'react-native';
-import { CHUNK_SIZE } from './transferProtocol';
+import { OFFLINE_CHUNK_SIZE } from './transferProtocol';
 import {
   isSafStreamAvailable,
   openSafStream,
@@ -17,7 +17,6 @@ import {
   abortSafStream,
 } from 'saf-stream';
 
-const READ_CHUNK = CHUNK_SIZE;
 const CACHE_STAGE_MAX = 100 * 1024 * 1024; // 100 MB fallback only
 
 function base64ToArrayBuffer(b64: string): ArrayBuffer {
@@ -38,12 +37,19 @@ function arrayBufferToBase64(buf: ArrayBuffer): string {
   return btoa(binary);
 }
 
+/**
+ * Stream a file in binary chunks. Constant memory.
+ * @param chunkSize defaults to offline 256 KB; pass ONLINE_CHUNK_SIZE (64 KB) for web-compatible online sends
+ */
 export async function streamFileChunks(
   uri: string,
   fileSize: number,
   onChunk: (chunk: ArrayBuffer, offset: number, index: number) => Promise<void>,
-  signal?: { cancelled: boolean }
+  signal?: { cancelled: boolean },
+  chunkSize: number = OFFLINE_CHUNK_SIZE
 ): Promise<void> {
+  const readChunk = Math.max(16 * 1024, chunkSize);
+
   try {
     const file = new File(uri);
     if (typeof file.open === 'function') {
@@ -54,7 +60,7 @@ export async function streamFileChunks(
         let index = 0;
         while (offset < fileSize) {
           if (signal?.cancelled) throw new Error('Transfer cancelled');
-          const toRead = Math.min(READ_CHUNK, fileSize - offset);
+          const toRead = Math.min(readChunk, fileSize - offset);
           const data = await handle.readBytes(toRead);
           if (!data || data.byteLength === 0) break;
           await onChunk(
@@ -83,7 +89,7 @@ export async function streamFileChunks(
   let index = 0;
   while (offset < fileSize) {
     if (signal?.cancelled) throw new Error('Transfer cancelled');
-    const length = Math.min(READ_CHUNK, fileSize - offset);
+    const length = Math.min(readChunk, fileSize - offset);
     const b64 = await FileSystemLegacy.readAsStringAsync(uri, {
       encoding: FileSystemLegacy.EncodingType.Base64,
       position: offset,
@@ -126,10 +132,6 @@ function openWriteHandle(uri: string): any | null {
   return null;
 }
 
-/**
- * Android SAF preferred path:
- * createFileAsync → native ContentResolver.openOutputStream → write chunks → close.
- */
 async function createNativeSafWriter(
   dirUri: string,
   safeName: string,
@@ -184,10 +186,6 @@ async function createNativeSafWriter(
   };
 }
 
-/**
- * Prefer native SAF OutputStream on Android.
- * Fallback: Expo FileHandle / small cache stage.
- */
 export async function createDirectReceivedWriter(
   fileName: string,
   mime: string | undefined,
@@ -205,7 +203,6 @@ export async function createDirectReceivedWriter(
   const label = await getSaveDirectoryLabel();
   const id = `${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 9)}`;
 
-  // ——— Native SAF path (correct 200 GB flow) ———
   if (
     Platform.OS === 'android' &&
     dirUri.startsWith('content://') &&
@@ -220,14 +217,12 @@ export async function createDirectReceivedWriter(
           'Save folder is not writable. Open Home and choose the LocalDrop folder again.'
         );
       }
-      // Fall through to JS fallback for small files only
       if (sizeHint > CACHE_STAGE_MAX) {
         throw e;
       }
     }
   }
 
-  // ——— JS / cache fallback (small files or non-Android) ———
   const allowCacheStage = sizeHint > 0 && sizeHint <= CACHE_STAGE_MAX;
   let targetUri: string;
   let mode: 'direct' | 'cache' = 'direct';

@@ -1,7 +1,7 @@
 /**
  * Public save folder only (system Files app).
  * User picks the folder via SAF — we persist the tree URI.
- * If Android later revokes write access, we detect it and force re-pick.
+ * Probe writes real bytes so "Folder OK" means receive will work.
  */
 
 import { Platform } from 'react-native';
@@ -22,6 +22,12 @@ export type ReceivedFileRecord = {
   size: number;
   mime?: string;
   receivedAt: number;
+};
+
+export type FolderTestResult = {
+  ok: boolean;
+  message: string;
+  label?: string;
 };
 
 function safeFileName(name: string): string {
@@ -93,37 +99,45 @@ export async function clearSaveDirectory() {
 }
 
 /**
- * Probe whether the persisted SAF/file folder is still writable.
- * Android can revoke tree permissions after reinstall, OS update, or storage changes.
+ * Strong probe: create file, write bytes, delete.
+ * Create-only was not enough — some folders allowed create but not write.
  */
 export async function isSaveDirectoryWritable(): Promise<boolean> {
   const dirUri = await getSaveDirectoryUri();
   if (!dirUri) return false;
 
   if (Platform.OS === 'android' && dirUri.startsWith('content://')) {
-    const probeName = `.localdrop_write_probe_${Date.now()}.tmp`;
+    const probeName = `.localdrop_probe_${Date.now()}.tmp`;
+    let fileUri: string | null = null;
     try {
-      const fileUri = await FileSystem.StorageAccessFramework.createFileAsync(
+      fileUri = await FileSystem.StorageAccessFramework.createFileAsync(
         dirUri,
         probeName,
         'application/octet-stream'
       );
-      try {
-        await FileSystem.deleteAsync(fileUri, { idempotent: true });
-      } catch {
-        /* ignore delete failure */
-      }
+      // Actually write bytes — catches "created but not writable"
+      await FileSystem.writeAsStringAsync(fileUri, 'LocalDrop-OK', {
+        encoding: FileSystem.EncodingType.UTF8,
+      });
       return true;
     } catch {
       return false;
+    } finally {
+      if (fileUri) {
+        try {
+          await FileSystem.deleteAsync(fileUri, { idempotent: true });
+        } catch {
+          /* */
+        }
+      }
     }
   }
 
-  // file:// / iOS style
   try {
     await FileSystem.makeDirectoryAsync(dirUri, { intermediates: true });
-    const probe = (dirUri.endsWith('/') ? dirUri : dirUri + '/') + `.localdrop_write_probe_${Date.now()}.tmp`;
-    await FileSystem.writeAsStringAsync(probe, 'ok');
+    const probe =
+      (dirUri.endsWith('/') ? dirUri : dirUri + '/') + `.localdrop_probe_${Date.now()}.tmp`;
+    await FileSystem.writeAsStringAsync(probe, 'LocalDrop-OK');
     await FileSystem.deleteAsync(probe, { idempotent: true }).catch(() => {});
     return true;
   } catch {
@@ -131,15 +145,39 @@ export async function isSaveDirectoryWritable(): Promise<boolean> {
   }
 }
 
-/**
- * Ensure we have a writable save folder. Clears a stale URI if not writable.
- * Returns true only when writes will succeed.
- */
 export async function ensureWritableSaveDirectory(): Promise<boolean> {
   if (!(await hasSaveDirectory())) return false;
   if (await isSaveDirectoryWritable()) return true;
   await clearSaveDirectory();
   return false;
+}
+
+/**
+ * UI-facing test for Home "Test save folder".
+ */
+export async function testSaveFolder(): Promise<FolderTestResult> {
+  const uri = await getSaveDirectoryUri();
+  if (!uri) {
+    return {
+      ok: false,
+      message: 'No folder selected. Tap Choose save folder first.',
+    };
+  }
+  const label = await getSaveDirectoryLabel();
+  const ok = await isSaveDirectoryWritable();
+  if (ok) {
+    return {
+      ok: true,
+      message: `Folder OK — ready to receive.\n${label}`,
+      label,
+    };
+  }
+  await clearSaveDirectory();
+  return {
+    ok: false,
+    message:
+      'Cannot write to this folder. Permission may have expired. Choose the LocalDrop folder again.',
+  };
 }
 
 export async function setupPublicSaveFolder(): Promise<boolean> {
@@ -155,7 +193,6 @@ export async function setupPublicSaveFolder(): Promise<boolean> {
     const perms = await FileSystem.StorageAccessFramework.requestDirectoryPermissionsAsync();
     if (!perms.granted || !perms.directoryUri) return false;
 
-    // Persist + verify immediately
     const label = humanPathFromSafUri(perms.directoryUri);
     await AsyncStorage.setItem(SAVE_DIR_KEY, perms.directoryUri);
     await AsyncStorage.setItem(SAVE_LABEL_KEY, label);
@@ -244,10 +281,6 @@ export async function resolveShareableUri(
   return path;
 }
 
-/**
- * Legacy path — loads full Base64 into memory.
- * Only safe for small files (< ~80 MB).
- */
 export async function saveReceivedFile(
   fileName: string,
   base64: string,
@@ -332,10 +365,6 @@ export async function saveReceivedFile(
   return { path: finalPath, displayPath, id };
 }
 
-/**
- * Preferred path for any file that may be large.
- * Streams chunks directly into the public LocalDrop / SAF folder.
- */
 export async function createStreamingWriter(
   fileName: string,
   mime?: string,

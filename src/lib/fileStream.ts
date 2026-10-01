@@ -1,7 +1,8 @@
 /**
  * Memory-safe chunked file I/O for LocalDrop.
  * Sender: stream from content:// / file:// (no full cache copy).
- * Receiver: stage to app cache temp, then move into SAF (reliable on Android).
+ * Receiver: prefer direct SAF document writes (supports large files).
+ * Cache staging only for small files when direct SAF open fails.
  */
 
 import * as FileSystemLegacy from 'expo-file-system/legacy';
@@ -10,6 +11,8 @@ import { Platform } from 'react-native';
 import { CHUNK_SIZE } from './transferProtocol';
 
 const READ_CHUNK = CHUNK_SIZE;
+/** Cache staging only allowed at or below this size when direct SAF fails */
+const CACHE_STAGE_MAX = 100 * 1024 * 1024; // 100 MB
 
 function base64ToArrayBuffer(b64: string): ArrayBuffer {
   const binary = atob(b64);
@@ -29,9 +32,6 @@ function arrayBufferToBase64(buf: ArrayBuffer): string {
   return btoa(binary);
 }
 
-/**
- * Stream a file in binary chunks. Constant memory.
- */
 export async function streamFileChunks(
   uri: string,
   fileSize: number,
@@ -95,7 +95,6 @@ export type ReceivedFileWriter = {
   writeChunk: (chunk: ArrayBuffer) => Promise<void>;
   finish: () => Promise<{ path: string; displayPath: string; id: string }>;
   abort: () => Promise<void>;
-  /** Bytes actually written to the staging file */
   getWrittenBytes: () => number;
 };
 
@@ -107,16 +106,28 @@ async function deleteUri(uri: string) {
   }
 }
 
+function openWriteHandle(uri: string): any | null {
+  try {
+    const file = new File(uri);
+    if (typeof file.open === 'function') {
+      const handle = file.open(FileMode.ReadWrite);
+      handle.offset = 0;
+      return handle;
+    }
+  } catch {
+    /* */
+  }
+  return null;
+}
+
 /**
- * Reliable receive writer:
- * 1) Stream all chunks into a real file:// temp in app cache (FileHandle).
- * 2) On finish, create SAF document and copy temp → content:// URI.
- * Avoids broken direct SAF FileHandle and malformed copy destinations.
+ * Prefer direct write into SAF / destination (large-file safe).
+ * Falls back to cache staging only when sizeHint <= 100 MB and direct open fails.
  */
 export async function createDirectReceivedWriter(
   fileName: string,
   mime: string | undefined,
-  _sizeHint: number,
+  sizeHint: number,
   getSaveDirectoryUri: () => Promise<string | null>,
   getSaveDirectoryLabel: () => Promise<string>
 ): Promise<ReceivedFileWriter> {
@@ -129,30 +140,87 @@ export async function createDirectReceivedWriter(
   const mimeType = mime || 'application/octet-stream';
   const label = await getSaveDirectoryLabel();
   const id = `${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 9)}`;
+  const allowCacheStage = sizeHint > 0 && sizeHint <= CACHE_STAGE_MAX;
 
-  const cacheDir = FileSystemLegacy.cacheDirectory || FileSystemLegacy.documentDirectory || '';
-  if (!cacheDir) {
-    throw new Error('No cache directory available on this device.');
-  }
-
-  // Always stage to a real file:// path first
-  const tempUri = `${cacheDir}localdrop_recv_${Date.now()}_${Math.random().toString(36).slice(2, 8)}_${safeName}`;
-  await FileSystemLegacy.writeAsStringAsync(tempUri, '', {
-    encoding: FileSystemLegacy.EncodingType.UTF8,
-  });
-
+  let targetUri: string;
+  let isSaf = false;
+  let mode: 'direct' | 'cache' = 'direct';
+  let tempUri: string | null = null;
+  let handle: any = null;
   let written = 0;
   let aborted = false;
-  let handle: any = null;
 
-  try {
-    const file = new File(tempUri);
-    if (typeof file.open === 'function') {
-      handle = file.open(FileMode.ReadWrite);
-      handle.offset = 0;
+  if (Platform.OS === 'android' && dirUri.startsWith('content://')) {
+    isSaf = true;
+    try {
+      targetUri = await FileSystemLegacy.StorageAccessFramework.createFileAsync(
+        dirUri,
+        safeName,
+        mimeType
+      );
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (/isn't writable|not writable|permission|SAF/i.test(msg)) {
+        throw new Error(
+          'Save folder is not writable. Open Home and choose the LocalDrop folder again.'
+        );
+      }
+      throw e;
     }
-  } catch {
-    handle = null;
+
+    handle = openWriteHandle(targetUri);
+    if (!handle) {
+      if (allowCacheStage) {
+        mode = 'cache';
+        const cacheDir =
+          FileSystemLegacy.cacheDirectory || FileSystemLegacy.documentDirectory || '';
+        if (!cacheDir) {
+          await deleteUri(targetUri);
+          throw new Error('No cache directory available for small-file fallback.');
+        }
+        tempUri = `${cacheDir}localdrop_recv_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+        await FileSystemLegacy.writeAsStringAsync(tempUri, '', {
+          encoding: FileSystemLegacy.EncodingType.UTF8,
+        });
+        handle = openWriteHandle(tempUri);
+        if (!handle) {
+          await deleteUri(tempUri);
+          await deleteUri(targetUri);
+          throw new Error(
+            'Could not open a write handle. Rebuild the app with the latest Expo SDK.'
+          );
+        }
+      } else {
+        // Large file — try base64 chunk overwrite is not viable; fail clear
+        await deleteUri(targetUri);
+        throw new Error(
+          'Cannot stream this large file into the save folder on this device. Re-select the LocalDrop folder on Home, or try a smaller test file first.'
+        );
+      }
+    }
+  } else {
+    const destDir = dirUri.endsWith('/') ? dirUri : dirUri + '/';
+    await FileSystemLegacy.makeDirectoryAsync(destDir, { intermediates: true }).catch(() => {});
+    targetUri = destDir + safeName;
+    try {
+      const info = await FileSystemLegacy.getInfoAsync(targetUri);
+      if (info.exists) {
+        const dot = safeName.lastIndexOf('.');
+        const stem = dot > 0 ? safeName.slice(0, dot) : safeName;
+        const ext = dot > 0 ? safeName.slice(dot) : '';
+        targetUri = `${destDir}${stem}_${Date.now()}${ext}`;
+      }
+    } catch {
+      /* */
+    }
+    await FileSystemLegacy.writeAsStringAsync(targetUri, '', {
+      encoding: FileSystemLegacy.EncodingType.UTF8,
+    });
+    handle = openWriteHandle(targetUri);
+    if (!handle) {
+      await deleteUri(targetUri);
+      throw new Error('Could not open destination file for writing.');
+    }
   }
 
   return {
@@ -161,27 +229,9 @@ export async function createDirectReceivedWriter(
     async writeChunk(chunk: ArrayBuffer) {
       if (aborted) return;
       const bytes = new Uint8Array(chunk);
-
-      if (handle) {
-        await handle.writeBytes(bytes);
-        handle.offset = (handle.offset ?? 0) + bytes.byteLength;
-        written += bytes.byteLength;
-        return;
-      }
-
-      // Base64 append fallback for tiny files only
-      if (written + bytes.byteLength > 80 * 1024 * 1024) {
-        throw new Error(
-          'Large-file receive requires modern FileHandle. Rebuild the app with latest Expo SDK.'
-        );
-      }
-      const b64 = arrayBufferToBase64(chunk);
-      const existing = await FileSystemLegacy.readAsStringAsync(tempUri, {
-        encoding: FileSystemLegacy.EncodingType.Base64,
-      }).catch(() => '');
-      await FileSystemLegacy.writeAsStringAsync(tempUri, existing + b64, {
-        encoding: FileSystemLegacy.EncodingType.Base64,
-      });
+      if (!handle) throw new Error('Write handle closed');
+      await handle.writeBytes(bytes);
+      handle.offset = (handle.offset ?? 0) + bytes.byteLength;
       written += bytes.byteLength;
     },
 
@@ -195,88 +245,37 @@ export async function createDirectReceivedWriter(
       }
       handle = null;
 
-      // Verify temp has data
-      try {
-        const info = await FileSystemLegacy.getInfoAsync(tempUri);
-        if (!info.exists || ((info as any).size ?? written) === 0) {
-          await deleteUri(tempUri);
-          throw new Error('Received file is empty — transfer may have failed.');
-        }
-      } catch (e) {
-        if (e instanceof Error && e.message.includes('empty')) throw e;
+      if (written === 0) {
+        if (tempUri) await deleteUri(tempUri);
+        await deleteUri(targetUri);
+        throw new Error('Received file is empty — transfer may have failed.');
       }
 
-      let finalPath: string;
-
-      if (Platform.OS === 'android' && dirUri.startsWith('content://')) {
-        // Create the destination document in the user-picked folder
-        let safFileUri: string;
+      if (mode === 'cache' && tempUri) {
         try {
-          safFileUri = await FileSystemLegacy.StorageAccessFramework.createFileAsync(
-            dirUri,
-            safeName,
-            mimeType
-          );
-        } catch (e) {
-          await deleteUri(tempUri);
-          const msg = e instanceof Error ? e.message : String(e);
-          if (/isn't writable|not writable|permission|SAF/i.test(msg)) {
-            throw new Error(
-              'Save folder is not writable. Open Home and choose the LocalDrop folder again.'
-            );
-          }
-          throw e;
-        }
-
-        // Copy file:// temp → content:// document (Expo-supported)
-        try {
-          await FileSystemLegacy.copyAsync({ from: tempUri, to: safFileUri });
-        } catch (copyErr) {
-          // Fallback: base64 write into SAF document (works for moderate sizes)
+          await FileSystemLegacy.copyAsync({ from: tempUri, to: targetUri });
+        } catch {
           try {
             const b64 = await FileSystemLegacy.readAsStringAsync(tempUri, {
               encoding: FileSystemLegacy.EncodingType.Base64,
             });
-            await FileSystemLegacy.writeAsStringAsync(safFileUri, b64, {
+            await FileSystemLegacy.writeAsStringAsync(targetUri, b64, {
               encoding: FileSystemLegacy.EncodingType.Base64,
             });
-          } catch {
-            await deleteUri(safFileUri);
+          } catch (e) {
             await deleteUri(tempUri);
-            const msg = copyErr instanceof Error ? copyErr.message : String(copyErr);
+            await deleteUri(targetUri);
             throw new Error(
-              `Could not save into LocalDrop folder. Re-select the folder on Home. (${msg})`
+              'Could not save into LocalDrop folder. Re-select the folder on Home.'
             );
           }
         }
-
         await deleteUri(tempUri);
-        finalPath = safFileUri;
-      } else {
-        // file:// destination (iOS / non-SAF)
-        const destDir = dirUri.endsWith('/') ? dirUri : dirUri + '/';
-        await FileSystemLegacy.makeDirectoryAsync(destDir, { intermediates: true }).catch(
-          () => {}
-        );
-        let dest = destDir + safeName;
-        try {
-          const info = await FileSystemLegacy.getInfoAsync(dest);
-          if (info.exists) {
-            const dot = safeName.lastIndexOf('.');
-            const stem = dot > 0 ? safeName.slice(0, dot) : safeName;
-            const ext = dot > 0 ? safeName.slice(dot) : '';
-            dest = `${destDir}${stem}_${Date.now()}${ext}`;
-          }
-        } catch {
-          /* */
-        }
-        await FileSystemLegacy.copyAsync({ from: tempUri, to: dest });
-        await deleteUri(tempUri);
-        finalPath = dest;
+        tempUri = null;
       }
 
       return {
-        path: finalPath,
+        path: targetUri,
         displayPath: `${label}/${safeName}`,
         id,
       };
@@ -290,12 +289,13 @@ export async function createDirectReceivedWriter(
         /* */
       }
       handle = null;
-      await deleteUri(tempUri);
+      if (tempUri) await deleteUri(tempUri);
+      await deleteUri(targetUri);
     },
   };
 }
 
-/** @deprecated Prefer createDirectReceivedWriter */
+/** @deprecated */
 export async function createReceivedFileWriter(
   fileName: string,
   mime: string | undefined,

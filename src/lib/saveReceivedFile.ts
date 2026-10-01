@@ -1,10 +1,7 @@
 /**
  * Public save folder only (system Files app).
- * User picks or creates the folder themselves — we never create a subfolder.
- * No second copy in app-private Documents.
- *
- * Large files use createStreamingWriter → direct write into SAF / destination
- * (no full temp cache copy). Receiver needs ~file size free, not 2×.
+ * User picks the folder via SAF — we persist the tree URI.
+ * If Android later revokes write access, we detect it and force re-pick.
  */
 
 import { Platform } from 'react-native';
@@ -91,6 +88,60 @@ export async function hasSaveDirectory(): Promise<boolean> {
   return !!uri;
 }
 
+export async function clearSaveDirectory() {
+  await AsyncStorage.multiRemove([SAVE_DIR_KEY, SAVE_LABEL_KEY]);
+}
+
+/**
+ * Probe whether the persisted SAF/file folder is still writable.
+ * Android can revoke tree permissions after reinstall, OS update, or storage changes.
+ */
+export async function isSaveDirectoryWritable(): Promise<boolean> {
+  const dirUri = await getSaveDirectoryUri();
+  if (!dirUri) return false;
+
+  if (Platform.OS === 'android' && dirUri.startsWith('content://')) {
+    const probeName = `.localdrop_write_probe_${Date.now()}.tmp`;
+    try {
+      const fileUri = await FileSystem.StorageAccessFramework.createFileAsync(
+        dirUri,
+        probeName,
+        'application/octet-stream'
+      );
+      try {
+        await FileSystem.deleteAsync(fileUri, { idempotent: true });
+      } catch {
+        /* ignore delete failure */
+      }
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  // file:// / iOS style
+  try {
+    await FileSystem.makeDirectoryAsync(dirUri, { intermediates: true });
+    const probe = (dirUri.endsWith('/') ? dirUri : dirUri + '/') + `.localdrop_write_probe_${Date.now()}.tmp`;
+    await FileSystem.writeAsStringAsync(probe, 'ok');
+    await FileSystem.deleteAsync(probe, { idempotent: true }).catch(() => {});
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Ensure we have a writable save folder. Clears a stale URI if not writable.
+ * Returns true only when writes will succeed.
+ */
+export async function ensureWritableSaveDirectory(): Promise<boolean> {
+  if (!(await hasSaveDirectory())) return false;
+  if (await isSaveDirectoryWritable()) return true;
+  await clearSaveDirectory();
+  return false;
+}
+
 export async function setupPublicSaveFolder(): Promise<boolean> {
   if (Platform.OS !== 'android') {
     const dir = (FileSystem.documentDirectory || '') + FOLDER_NAME + '/';
@@ -104,17 +155,20 @@ export async function setupPublicSaveFolder(): Promise<boolean> {
     const perms = await FileSystem.StorageAccessFramework.requestDirectoryPermissionsAsync();
     if (!perms.granted || !perms.directoryUri) return false;
 
+    // Persist + verify immediately
     const label = humanPathFromSafUri(perms.directoryUri);
     await AsyncStorage.setItem(SAVE_DIR_KEY, perms.directoryUri);
     await AsyncStorage.setItem(SAVE_LABEL_KEY, label);
+
+    const ok = await isSaveDirectoryWritable();
+    if (!ok) {
+      await clearSaveDirectory();
+      return false;
+    }
     return true;
   } catch {
     return false;
   }
-}
-
-export async function clearSaveDirectory() {
-  await AsyncStorage.multiRemove([SAVE_DIR_KEY, SAVE_LABEL_KEY]);
 }
 
 /** @deprecated */
@@ -162,7 +216,6 @@ export async function removeFromReceivedIndex(id: string) {
   await writeIndex(list.filter((x) => x.id !== id));
 }
 
-/** Remove entries from the app list only — files stay on disk. */
 export async function removeManyFromReceivedIndex(ids: string[]) {
   if (!ids.length) return;
   const set = new Set(ids);
@@ -171,8 +224,7 @@ export async function removeManyFromReceivedIndex(ids: string[]) {
 }
 
 export async function ensureSaveFolderOrPrompt(): Promise<boolean> {
-  if (await hasSaveDirectory()) return true;
-  return false;
+  return ensureWritableSaveDirectory();
 }
 
 export async function resolveShareableUri(
@@ -202,6 +254,12 @@ export async function saveReceivedFile(
   mime?: string,
   sizeHint?: number
 ): Promise<{ path: string; displayPath: string; id: string }> {
+  if (!(await ensureWritableSaveDirectory())) {
+    throw new Error(
+      'Save folder is not writable. Open Home and choose the LocalDrop folder again.'
+    );
+  }
+
   const dirUri = await getSaveDirectoryUri();
   if (!dirUri) {
     throw new Error('Save folder not set. Open Home and choose a folder first.');
@@ -214,33 +272,44 @@ export async function saveReceivedFile(
 
   let finalPath: string;
 
-  if (Platform.OS === 'android' && dirUri.startsWith('content://')) {
-    finalPath = await FileSystem.StorageAccessFramework.createFileAsync(
-      dirUri,
-      name,
-      mimeType
-    );
-    await FileSystem.writeAsStringAsync(finalPath, base64, {
-      encoding: FileSystem.EncodingType.Base64,
-    });
-  } else {
-    await FileSystem.makeDirectoryAsync(dirUri, { intermediates: true }).catch(() => {});
-    let path = dirUri.endsWith('/') ? dirUri + name : dirUri + '/' + name;
-    try {
-      const info = await FileSystem.getInfoAsync(path);
-      if (info.exists) {
-        const dot = name.lastIndexOf('.');
-        const stem = dot > 0 ? name.slice(0, dot) : name;
-        const ext = dot > 0 ? name.slice(dot) : '';
-        path = `${dirUri.endsWith('/') ? dirUri : dirUri + '/'}${stem}_${Date.now()}${ext}`;
+  try {
+    if (Platform.OS === 'android' && dirUri.startsWith('content://')) {
+      finalPath = await FileSystem.StorageAccessFramework.createFileAsync(
+        dirUri,
+        name,
+        mimeType
+      );
+      await FileSystem.writeAsStringAsync(finalPath, base64, {
+        encoding: FileSystem.EncodingType.Base64,
+      });
+    } else {
+      await FileSystem.makeDirectoryAsync(dirUri, { intermediates: true }).catch(() => {});
+      let path = dirUri.endsWith('/') ? dirUri + name : dirUri + '/' + name;
+      try {
+        const info = await FileSystem.getInfoAsync(path);
+        if (info.exists) {
+          const dot = name.lastIndexOf('.');
+          const stem = dot > 0 ? name.slice(0, dot) : name;
+          const ext = dot > 0 ? name.slice(dot) : '';
+          path = `${dirUri.endsWith('/') ? dirUri : dirUri + '/'}${stem}_${Date.now()}${ext}`;
+        }
+      } catch {
+        /* */
       }
-    } catch {
-      /* */
+      await FileSystem.writeAsStringAsync(path, base64, {
+        encoding: FileSystem.EncodingType.Base64,
+      });
+      finalPath = path;
     }
-    await FileSystem.writeAsStringAsync(path, base64, {
-      encoding: FileSystem.EncodingType.Base64,
-    });
-    finalPath = path;
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (/isn't writable|not writable|permission|SAF|createSAFFileAsync/i.test(msg)) {
+      await clearSaveDirectory();
+      throw new Error(
+        'Save folder is not writable. Open Home and choose the LocalDrop folder again.'
+      );
+    }
+    throw e;
   }
 
   const approxSize =
@@ -266,37 +335,53 @@ export async function saveReceivedFile(
 /**
  * Preferred path for any file that may be large.
  * Streams chunks directly into the public LocalDrop / SAF folder.
- * No full temp copy in app cache when FileHandle works (normal case).
  */
 export async function createStreamingWriter(
   fileName: string,
   mime?: string,
   sizeHint?: number
 ): Promise<ReceivedFileWriter> {
-  const writer = await createDirectReceivedWriter(
-    fileName,
-    mime,
-    sizeHint ?? 0,
-    getSaveDirectoryUri,
-    getSaveDirectoryLabel
-  );
+  if (!(await ensureWritableSaveDirectory())) {
+    throw new Error(
+      'Save folder is not writable. Open Home and choose the LocalDrop folder again.'
+    );
+  }
 
-  const originalFinish = writer.finish.bind(writer);
-  writer.finish = async () => {
-    const result = await originalFinish();
-    await addToReceivedIndex({
-      id: result.id,
-      name: safeFileName(fileName),
-      path: result.path,
-      displayPath: result.displayPath,
-      size: sizeHint ?? 0,
-      mime: mime || 'application/octet-stream',
-      receivedAt: Date.now(),
-    });
-    return result;
-  };
+  try {
+    const writer = await createDirectReceivedWriter(
+      fileName,
+      mime,
+      sizeHint ?? 0,
+      getSaveDirectoryUri,
+      getSaveDirectoryLabel
+    );
 
-  return writer;
+    const originalFinish = writer.finish.bind(writer);
+    writer.finish = async () => {
+      const result = await originalFinish();
+      await addToReceivedIndex({
+        id: result.id,
+        name: safeFileName(fileName),
+        path: result.path,
+        displayPath: result.displayPath,
+        size: sizeHint ?? 0,
+        mime: mime || 'application/octet-stream',
+        receivedAt: Date.now(),
+      });
+      return result;
+    };
+
+    return writer;
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (/isn't writable|not writable|permission|SAF|createSAFFileAsync/i.test(msg)) {
+      await clearSaveDirectory();
+      throw new Error(
+        'Save folder is not writable. Open Home and choose the LocalDrop folder again.'
+      );
+    }
+    throw e;
+  }
 }
 
 export async function initLocalDropStorage(): Promise<void> {}

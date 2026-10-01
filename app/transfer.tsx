@@ -90,6 +90,8 @@ export default function TransferScreen() {
       }
     >
   >(new Map());
+  /** Serialize data-channel handling so file-complete never races ahead of writes */
+  const msgQueueRef = useRef<Promise<void>>(Promise.resolve());
 
   useEffect(() => {
     queueRef.current = queue;
@@ -372,8 +374,29 @@ export default function TransferScreen() {
         const entry = writersRef.current.get(msg.fileId);
         if (!entry) return;
 
-        if (entry.receivedBytes < entry.meta.size * 0.98) {
-          const errMsg = `Incomplete: ${formatBytes(entry.receivedBytes)} of ${formatBytes(entry.meta.size)}`;
+        // Drain: wait for in-flight chunks (and late arrivals) to catch up to declared size
+        const target = entry.meta.size;
+        const deadline = Date.now() + 8000;
+        while (Date.now() < deadline) {
+          const written = Math.max(
+            entry.receivedBytes,
+            entry.writer.getWrittenBytes?.() ?? 0
+          );
+          entry.receivedBytes = written;
+          if (written >= target) break;
+          // Close enough for rounding / last tiny chunk already applied
+          if (target > 0 && written / target >= 0.999) break;
+          await new Promise((r) => setTimeout(r, 40));
+        }
+
+        const finalBytes = Math.max(
+          entry.receivedBytes,
+          entry.writer.getWrittenBytes?.() ?? 0
+        );
+        entry.receivedBytes = finalBytes;
+
+        if (finalBytes < target * 0.995) {
+          const errMsg = `Incomplete: ${formatBytes(finalBytes)} of ${formatBytes(target)}`;
           updateFile(msg.fileId, { status: 'error', error: errMsg });
           try {
             await entry.writer.abort();
@@ -465,7 +488,11 @@ export default function TransferScreen() {
           setTimeout(() => void sendTransferOffer(), 400);
         }
       },
-      onMessage: (data) => void handleProtocol(data),
+      onMessage: (data) => {
+        msgQueueRef.current = msgQueueRef.current
+          .then(() => handleProtocol(data))
+          .catch(() => {});
+      },
       onClose: () => {},
       onFailed: (reason) => {
         setError(reason);
@@ -612,43 +639,34 @@ export default function TransferScreen() {
         <View style={styles.list}>
           {queue.map((f) => (
             <View key={f.id} style={styles.fileRow}>
-              <View style={{ flex: 1 }}>
-                <Text style={styles.fileName} numberOfLines={1}>
-                  {f.name}
+              <Text style={styles.fileName} numberOfLines={1}>
+                {f.name}
+              </Text>
+              <Text style={styles.fileMeta}>
+                {f.status}
+                {f.progress > 0 ? ` · ${f.progress}%` : ''}
+                {` · ${formatBytes(f.size)}`}
+              </Text>
+              {f.error ? <Text style={styles.fileErr}>{f.error}</Text> : null}
+              {f.displayPath ? (
+                <Text style={styles.filePath} numberOfLines={1}>
+                  {f.displayPath}
                 </Text>
-                <Text style={styles.fileMeta}>
-                  {f.status === 'completed'
-                    ? f.uri
-                      ? `Sent · ${formatBytes(f.size)}`
-                      : `Saved · ${f.displayPath || f.name}`
-                    : f.status === 'error'
-                      ? `Error · ${f.error || 'failed'}`
-                      : `${f.status} · ${f.progress}% · ${formatBytes(f.size)}`}
-                </Text>
-              </View>
-              {f.status === 'completed' && (
-                <Text style={styles.okBadge}>{f.uri ? 'Sent' : 'Saved'}</Text>
-              )}
-              {f.status === 'error' && <Text style={styles.errBadge}>Error</Text>}
+              ) : null}
             </View>
           ))}
         </View>
       )}
 
-      {saveHint && <Text style={styles.saveHint}>{saveHint}</Text>}
-      {error && <Text style={styles.error}>{error}</Text>}
-
       {phase === 'completed' && (
-        <Pressable style={styles.primaryBtn} onPress={() => router.replace('/')}>
-          <Text style={styles.primaryBtnText}>Done</Text>
-        </Pressable>
+        <Text style={styles.done}>Transfer complete</Text>
       )}
+      {saveHint ? <Text style={styles.saveHint}>{saveHint}</Text> : null}
+      {error ? <Text style={styles.error}>{error}</Text> : null}
 
-      {phase === 'failed' && (
-        <Pressable style={styles.primaryBtn} onPress={() => router.back()}>
-          <Text style={styles.primaryBtnText}>Go Back</Text>
-        </Pressable>
-      )}
+      <Pressable style={styles.backBtn} onPress={() => router.back()}>
+        <Text style={styles.primaryBtnText}>Go Back</Text>
+      </Pressable>
     </ScrollView>
   );
 }
@@ -656,71 +674,96 @@ export default function TransferScreen() {
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#0f0f0f' },
   content: { padding: 24, paddingBottom: 48 },
-  title: { color: '#fff', fontSize: 22, fontWeight: '700', textAlign: 'center' },
-  peer: { color: '#3b82f6', textAlign: 'center', marginBottom: 4 },
-  wifiHint: { color: '#fbbf24', fontSize: 12, textAlign: 'center', marginBottom: 20 },
-  center: { alignItems: 'center', marginVertical: 24 },
-  status: { color: '#aaa', marginTop: 12 },
-  ready: { color: '#22c55e', fontWeight: '600', marginBottom: 16 },
-  hint: { color: '#888', marginTop: 12 },
-  primaryBtn: {
-    backgroundColor: '#3b82f6',
-    borderRadius: 14,
-    paddingVertical: 14,
-    paddingHorizontal: 32,
-    alignItems: 'center',
-    marginTop: 16,
+  title: {
+    fontSize: 28,
+    fontWeight: '700',
+    color: '#fff',
+    textAlign: 'center',
+    marginBottom: 6,
   },
-  primaryBtnText: { color: '#fff', fontWeight: '600' },
+  peer: { color: '#3b82f6', textAlign: 'center', marginBottom: 6 },
+  wifiHint: {
+    color: '#eab308',
+    fontSize: 12,
+    textAlign: 'center',
+    marginBottom: 20,
+  },
+  center: { alignItems: 'center', paddingVertical: 24 },
+  status: { color: '#a0a0a0', marginTop: 12 },
+  ready: { color: '#fff', fontSize: 16, marginBottom: 16 },
+  hint: { color: '#888', marginTop: 8 },
   offerBox: {
     backgroundColor: '#1a1a1a',
-    borderRadius: 16,
-    padding: 20,
+    borderRadius: 14,
+    padding: 16,
+    borderWidth: 1,
+    borderColor: '#333',
     marginBottom: 16,
   },
   offerTitle: { color: '#ccc', marginBottom: 12 },
-  fileLine: { color: '#ccc', marginBottom: 4 },
-  total: { color: '#888', marginTop: 8, marginBottom: 16 },
-  row: { flexDirection: 'row', gap: 12 },
+  fileLine: { color: '#fff', marginBottom: 4 },
+  total: { color: '#a0a0a0', marginTop: 8, marginBottom: 14 },
+  row: { flexDirection: 'row', gap: 10 },
   acceptBtn: {
     flex: 1,
-    backgroundColor: '#22c55e',
+    backgroundColor: '#3b82f6',
     borderRadius: 12,
     paddingVertical: 12,
     alignItems: 'center',
   },
   rejectBtn: {
     flex: 1,
-    borderWidth: 1,
-    borderColor: '#444',
+    backgroundColor: '#222',
     borderRadius: 12,
     paddingVertical: 12,
     alignItems: 'center',
+    borderWidth: 1,
+    borderColor: '#444',
   },
-  cancelText: { color: '#ef4444' },
-  progressBox: { marginVertical: 16 },
+  cancelText: { color: '#fff', fontWeight: '600' },
+  progressBox: { marginBottom: 16 },
   barBg: {
     height: 8,
-    backgroundColor: '#333',
+    backgroundColor: '#222',
     borderRadius: 4,
     overflow: 'hidden',
   },
-  barFill: { height: '100%', backgroundColor: '#3b82f6' },
-  stats: { color: '#fff', marginTop: 8, textAlign: 'center' },
+  barFill: { height: 8, backgroundColor: '#3b82f6' },
+  stats: { color: '#ccc', marginTop: 8, textAlign: 'center' },
   speed: { color: '#888', textAlign: 'center', marginTop: 4 },
-  list: { marginTop: 16 },
+  list: { gap: 10, marginBottom: 16 },
   fileRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
     backgroundColor: '#1a1a1a',
-    borderRadius: 10,
+    borderRadius: 12,
     padding: 12,
+    borderWidth: 1,
+    borderColor: '#2a2a2a',
+  },
+  fileName: { color: '#fff', fontWeight: '600' },
+  fileMeta: { color: '#888', fontSize: 12, marginTop: 4 },
+  fileErr: { color: '#f87171', fontSize: 12, marginTop: 4 },
+  filePath: { color: '#64748b', fontSize: 11, marginTop: 4 },
+  done: {
+    color: '#4ade80',
+    textAlign: 'center',
+    fontWeight: '700',
     marginBottom: 8,
   },
-  fileName: { color: '#fff', fontSize: 14 },
-  fileMeta: { color: '#888', fontSize: 12, marginTop: 2 },
-  okBadge: { color: '#22c55e', fontWeight: '600', fontSize: 12 },
-  errBadge: { color: '#ef4444', fontWeight: '600', fontSize: 12 },
-  saveHint: { color: '#22c55e', textAlign: 'center', marginTop: 12 },
-  error: { color: '#ef4444', textAlign: 'center', marginTop: 16 },
+  saveHint: { color: '#94a3b8', textAlign: 'center', marginBottom: 8 },
+  error: { color: '#f87171', textAlign: 'center', marginBottom: 12 },
+  primaryBtn: {
+    backgroundColor: '#3b82f6',
+    borderRadius: 12,
+    paddingVertical: 14,
+    paddingHorizontal: 24,
+    alignItems: 'center',
+  },
+  primaryBtnText: { color: '#fff', fontWeight: '700', fontSize: 16 },
+  backBtn: {
+    backgroundColor: '#3b82f6',
+    borderRadius: 14,
+    paddingVertical: 16,
+    alignItems: 'center',
+    marginTop: 8,
+  },
 });

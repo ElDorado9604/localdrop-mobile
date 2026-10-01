@@ -27,7 +27,7 @@ import {
 import {
   createStreamingWriter,
   ensureAppLocalDropDir,
-  hasSaveDirectory,
+  ensureWritableSaveDirectory,
   setupPublicSaveFolder,
 } from '../src/lib/saveReceivedFile';
 import { streamFileChunks } from '../src/lib/fileStream';
@@ -319,10 +319,15 @@ export default function TransferScreen() {
       } else if (msg.type === 'file-start') {
         const totalChunks = Math.ceil(msg.size / CHUNK_SIZE) || 1;
 
-        if (!(await hasSaveDirectory())) {
+        if (!(await ensureWritableSaveDirectory())) {
           const ok = await setupPublicSaveFolder();
           if (!ok) {
-            updateFile(msg.fileId, { status: 'error', error: 'Save folder not set' });
+            updateFile(msg.fileId, {
+              status: 'error',
+              error: 'Save folder is not writable. Open Home and choose the LocalDrop folder again.',
+            });
+            setPhase('failed');
+            setError('Save folder is not writable. Open Home and choose the LocalDrop folder again.');
             return;
           }
         }
@@ -613,41 +618,37 @@ export default function TransferScreen() {
                 </Text>
                 <Text style={styles.fileMeta}>
                   {f.status === 'completed'
-                    ? `Saved · ${f.displayPath || 'LocalDrop/' + f.name}`
+                    ? f.uri
+                      ? `Sent · ${formatBytes(f.size)}`
+                      : `Saved · ${f.displayPath || f.name}`
                     : f.status === 'error'
                       ? `Error · ${f.error || 'failed'}`
                       : `${f.status} · ${f.progress}% · ${formatBytes(f.size)}`}
                 </Text>
               </View>
-              {f.status === 'completed' && <Text style={styles.savedBadge}>Saved</Text>}
+              {f.status === 'completed' && (
+                <Text style={styles.okBadge}>{f.uri ? 'Sent' : 'Saved'}</Text>
+              )}
+              {f.status === 'error' && <Text style={styles.errBadge}>Error</Text>}
             </View>
           ))}
         </View>
       )}
 
-      {phase === 'completed' && (
-        <>
-          <Text style={styles.done}>
-            {role === 'receiver' ? 'Saved to LocalDrop folder' : 'Transfer complete'}
-          </Text>
-          {role === 'receiver' && (
-            <Pressable
-              style={styles.receivedBtn}
-              onPress={() => router.replace('/received')}
-            >
-              <Text style={styles.receivedBtnText}>View Files Received</Text>
-            </Pressable>
-          )}
-        </>
-      )}
-      {saveHint && role === 'receiver' && (
-        <Text style={styles.saveHint}>{saveHint}</Text>
-      )}
+      {saveHint && <Text style={styles.saveHint}>{saveHint}</Text>}
       {error && <Text style={styles.error}>{error}</Text>}
 
-      <Pressable style={styles.homeBtn} onPress={() => router.replace('/')}>
-        <Text style={styles.homeText}>Back to Home</Text>
-      </Pressable>
+      {phase === 'completed' && (
+        <Pressable style={styles.primaryBtn} onPress={() => router.replace('/')}>
+          <Text style={styles.primaryBtnText}>Done</Text>
+        </Pressable>
+      )}
+
+      {phase === 'failed' && (
+        <Pressable style={styles.primaryBtn} onPress={() => router.back()}>
+          <Text style={styles.primaryBtnText}>Go Back</Text>
+        </Pressable>
+      )}
     </ScrollView>
   );
 }
@@ -656,18 +657,19 @@ const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#0f0f0f' },
   content: { padding: 24, paddingBottom: 48 },
   title: { color: '#fff', fontSize: 22, fontWeight: '700', textAlign: 'center' },
-  peer: { color: '#3b82f6', textAlign: 'center', marginBottom: 8 },
+  peer: { color: '#3b82f6', textAlign: 'center', marginBottom: 4 },
   wifiHint: { color: '#fbbf24', fontSize: 12, textAlign: 'center', marginBottom: 20 },
   center: { alignItems: 'center', marginVertical: 24 },
   status: { color: '#aaa', marginTop: 12 },
   ready: { color: '#22c55e', fontWeight: '600', marginBottom: 16 },
-  hint: { color: '#888', marginTop: 8 },
+  hint: { color: '#888', marginTop: 12 },
   primaryBtn: {
     backgroundColor: '#3b82f6',
     borderRadius: 14,
     paddingVertical: 14,
     paddingHorizontal: 32,
     alignItems: 'center',
+    marginTop: 16,
   },
   primaryBtnText: { color: '#fff', fontWeight: '600' },
   offerBox: {
@@ -696,13 +698,12 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   cancelText: { color: '#ef4444' },
-  progressBox: { marginVertical: 16, alignItems: 'center' },
+  progressBox: { marginVertical: 16 },
   barBg: {
     height: 8,
     backgroundColor: '#333',
     borderRadius: 4,
     overflow: 'hidden',
-    width: '100%',
   },
   barFill: { height: '100%', backgroundColor: '#3b82f6' },
   stats: { color: '#fff', marginTop: 8, textAlign: 'center' },
@@ -718,20 +719,8 @@ const styles = StyleSheet.create({
   },
   fileName: { color: '#fff', fontSize: 14 },
   fileMeta: { color: '#888', fontSize: 12, marginTop: 2 },
-  savedBadge: { color: '#22c55e', fontWeight: '600', fontSize: 12 },
-  done: { color: '#22c55e', fontWeight: '700', fontSize: 18, textAlign: 'center', marginTop: 16 },
-  receivedBtn: {
-    backgroundColor: '#1a1a1a',
-    borderWidth: 1,
-    borderColor: '#3b82f6',
-    borderRadius: 14,
-    paddingVertical: 14,
-    alignItems: 'center',
-    marginTop: 12,
-  },
-  receivedBtnText: { color: '#3b82f6', fontWeight: '600' },
-  saveHint: { color: '#888', textAlign: 'center', marginTop: 8, fontSize: 13 },
+  okBadge: { color: '#22c55e', fontWeight: '600', fontSize: 12 },
+  errBadge: { color: '#ef4444', fontWeight: '600', fontSize: 12 },
+  saveHint: { color: '#22c55e', textAlign: 'center', marginTop: 12 },
   error: { color: '#ef4444', textAlign: 'center', marginTop: 16 },
-  homeBtn: { marginTop: 32, alignItems: 'center' },
-  homeText: { color: '#888' },
 });

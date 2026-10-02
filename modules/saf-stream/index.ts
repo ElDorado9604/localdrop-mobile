@@ -7,6 +7,9 @@ type SafStreamNative = {
   writeBase64(streamId: string, base64: string): Promise<number>;
   close(streamId: string): Promise<void>;
   abort(streamId: string, documentUri?: string | null): Promise<void>;
+  openInput(documentUri: string): Promise<string>;
+  readInputBase64(streamId: string, maxBytes: number): Promise<string>;
+  closeInput(streamId: string): Promise<void>;
 };
 
 let native: SafStreamNative | null = null;
@@ -19,7 +22,6 @@ function getNative(): SafStreamNative | null {
     return native;
   } catch {
     try {
-      // Fallback for older proxy shape
       const mod = (NativeModulesProxy as any)?.SafStream;
       if (mod) {
         native = mod as SafStreamNative;
@@ -67,6 +69,33 @@ export async function abortSafStream(streamId: string, documentUri?: string | nu
   await mod.abort(streamId, documentUri ?? null);
 }
 
+/** Open content:// (or other) URI for sequential read. */
+export async function openSafInputStream(documentUri: string): Promise<string> {
+  const mod = getNative();
+  if (!mod?.openInput) {
+    throw new Error('SafStream input is not available. Rebuild the Android APK.');
+  }
+  return mod.openInput(documentUri);
+}
+
+/** Read up to maxBytes; empty string means EOF. */
+export async function readSafInputStreamBase64(
+  streamId: string,
+  maxBytes: number
+): Promise<string> {
+  const mod = getNative();
+  if (!mod?.readInputBase64) {
+    throw new Error('SafStream input is not available');
+  }
+  return mod.readInputBase64(streamId, maxBytes);
+}
+
+export async function closeSafInputStream(streamId: string): Promise<void> {
+  const mod = getNative();
+  if (!mod?.closeInput) return;
+  await mod.closeInput(streamId);
+}
+
 export default {
   isAvailable: isSafStreamAvailable,
   open: openSafStream,
@@ -74,4 +103,7 @@ export default {
   writeBase64: writeSafStreamBase64,
   close: closeSafStream,
   abort: abortSafStream,
+  openInput: openSafInputStream,
+  readInputBase64: readSafInputStreamBase64,
+  closeInput: closeSafInputStream,
 };

@@ -37,6 +37,7 @@ import {
 import { streamFileChunks } from '../src/lib/fileStream';
 import type { ReceivedFileWriter } from '../src/lib/fileStream';
 import { getDisplayName } from '../src/lib/deviceName';
+import { logError, logInfo, logWarn } from '../src/lib/logger';
 
 type QueuedFile = {
   id: string;
@@ -162,14 +163,18 @@ export default function TransferScreen() {
 
     const pending = queueRef.current.filter((f) => f.status === 'pending' && f.uri);
     if (pending.length === 0) {
-      setError('No files to send');
+      const msg = 'No files to send';
+      logWarn('transfer', msg);
+      setError(msg);
       setPhase('failed');
       return;
     }
 
     for (const f of pending) {
       if (f.size > MAX_FILE_SIZE) {
-        setError(`File "${f.name}" exceeds the 200 GB limit.`);
+        const msg = `File "${f.name}" exceeds the 200 GB limit.`;
+        logError('transfer', msg);
+        setError(msg);
         setPhase('failed');
         return;
       }
@@ -228,6 +233,7 @@ export default function TransferScreen() {
         updateFile(item.id, { status: 'completed', progress: 100 });
       } catch (e) {
         const msg = e instanceof Error ? e.message : 'Send failed';
+        logError('transfer', `send failed for ${item.name}: ${msg}`);
         updateFile(item.id, { status: 'error', error: msg });
         session.sendJson({ type: 'transfer-error', message: msg });
         setPhase('failed');
@@ -237,6 +243,7 @@ export default function TransferScreen() {
     }
 
     if (!cancelledRef.current && allFilesOk()) {
+      logInfo('transfer', 'all files sent; waiting for receiver ack');
       session.sendJson({ type: 'transfer-complete' });
       awaitingTransferAckRef.current = true;
       if (transferAckTimerRef.current) {
@@ -252,8 +259,10 @@ export default function TransferScreen() {
         }
       }, 5000);
     } else if (!cancelledRef.current) {
+      const msg = 'Transfer did not complete successfully';
+      logError('transfer', msg);
       setPhase('failed');
-      setError('Transfer did not complete successfully');
+      setError(msg);
     }
   }, [updateFile, allFilesOk]);
 
@@ -382,9 +391,11 @@ export default function TransferScreen() {
             return next;
           });
         } catch (e) {
+          const msg = e instanceof Error ? e.message : 'Write failed';
+          logError('transfer', `write failed for ${activeId}: ${msg}`);
           updateFile(activeId, {
             status: 'error',
-            error: e instanceof Error ? e.message : 'Write failed',
+            error: msg,
           });
         }
         return;
@@ -420,9 +431,11 @@ export default function TransferScreen() {
       } else if (msg.type === 'transfer-accepted') {
         void runSend();
       } else if (msg.type === 'transfer-rejected') {
+        const msgText = 'Receiver declined the transfer.';
+        logWarn('transfer', msgText);
         offerSentRef.current = false;
         setPhase('ready');
-        setError('Receiver declined the transfer.');
+        setError(msgText);
       } else if (msg.type === 'file-start') {
         const totalChunks = Math.ceil(msg.size / ONLINE_CHUNK_SIZE) || 1;
         setTitleRole('receiver');
@@ -430,12 +443,14 @@ export default function TransferScreen() {
         if (!(await ensureWritableSaveDirectory())) {
           const ok = await setupPublicSaveFolder();
           if (!ok) {
+            const errMsg = 'Save folder is not writable. Open Home and choose the LocalDrop folder again.';
+            logError('transfer', `save-dir setup failed for ${msg.fileId}: ${errMsg}`);
             updateFile(msg.fileId, {
               status: 'error',
-              error: 'Save folder is not writable. Open Home and choose the LocalDrop folder again.',
+              error: errMsg,
             });
             setPhase('failed');
-            setError('Save folder is not writable. Open Home and choose the LocalDrop folder again.');
+            setError(errMsg);
             return;
           }
         }
@@ -449,9 +464,11 @@ export default function TransferScreen() {
             totalChunks,
           });
         } catch (e) {
+          const errMsg = e instanceof Error ? e.message : 'Could not create writer';
+          logError('transfer', `writer creation failed for ${msg.fileId}: ${errMsg}`);
           updateFile(msg.fileId, {
             status: 'error',
-            error: e instanceof Error ? e.message : 'Could not create writer',
+            error: errMsg,
           });
           return;
         }
@@ -501,6 +518,7 @@ export default function TransferScreen() {
 
         if (finalBytes < target * 0.995) {
           const errMsg = `Incomplete: ${formatBytes(finalBytes)} of ${formatBytes(target)}`;
+          logError('transfer', `incomplete file ${msg.fileId}: ${errMsg}`);
           updateFile(msg.fileId, { status: 'error', error: errMsg });
           try {
             await entry.writer.abort();
@@ -524,9 +542,11 @@ export default function TransferScreen() {
           setSaveHint(`Saved to ${saved.displayPath}`);
           writersRef.current.delete(msg.fileId);
         } catch (e) {
+          const errMsg = e instanceof Error ? e.message : 'Save failed';
+          logError('transfer', `finish failed for ${msg.fileId}: ${errMsg}`);
           updateFile(msg.fileId, {
             status: 'error',
-            error: e instanceof Error ? e.message : 'Save failed',
+            error: errMsg,
           });
           try {
             await entry.writer.abort();
@@ -575,8 +595,10 @@ export default function TransferScreen() {
         setPhase('ready');
         setError('Transfer cancelled.');
       } else if (msg.type === 'transfer-error') {
+        const errMsg = msg.message || 'Transfer error';
+        logError('transfer', errMsg);
         setPhase('failed');
-        setError(msg.message);
+        setError(errMsg);
       }
     },
     [updateFile, runSend, allFilesOk]
@@ -619,10 +641,13 @@ export default function TransferScreen() {
           .catch(() => {});
       },
       onClose: () => {
-        setError('Connection closed');
+        const msg = 'Connection closed';
+        logWarn('transfer', msg);
+        setError(msg);
         setPhase('failed');
       },
       onFailed: (reason) => {
+        logError('transfer', `WebRTC failed: ${reason}`);
         setError(reason);
         setPhase('failed');
       },

@@ -38,6 +38,7 @@ import { streamFileChunks } from '../src/lib/fileStream';
 import type { ReceivedFileWriter } from '../src/lib/fileStream';
 import { getDisplayName } from '../src/lib/deviceName';
 import { setTransferKeepAwake } from '../src/lib/keepTransferAwake';
+import { logError, logWarn } from '../src/lib/logger';
 
 type QueuedFile = {
   id: string;
@@ -217,6 +218,7 @@ export default function OfflineSessionScreen() {
         completedIds.push(item.id);
       } catch (e) {
         const msg = e instanceof Error ? e.message : 'File transfer failed';
+        logError('offline-transfer', `send failed for ${item.name}: ${msg}`);
         updateFile(item.id, { status: 'error', error: msg });
         session.sendJson({ type: 'transfer-error', message: msg });
         setPhase('failed');
@@ -278,6 +280,7 @@ export default function OfflineSessionScreen() {
           });
         } catch (e) {
           const msg = e instanceof Error ? e.message : 'Write failed';
+          logError('offline-transfer', `write failed for ${activeId}: ${msg}`);
           updateFile(activeId, { status: 'error', error: msg });
           try {
             await entry.writer.abort();
@@ -332,8 +335,10 @@ export default function OfflineSessionScreen() {
         startTimeRef.current = Date.now();
         void runSend();
       } else if (msg.type === 'transfer-rejected') {
+        const msgText = 'File transfer was declined.';
+        logWarn('offline-transfer', msgText);
         setPhase('ready');
-        setError('File transfer was declined.');
+        setError(msgText);
       } else if (msg.type === 'file-start') {
         const totalChunks = Math.ceil(msg.size / OFFLINE_CHUNK_SIZE) || 1;
 
@@ -342,6 +347,7 @@ export default function OfflineSessionScreen() {
           if (!ok) {
             const errMsg =
               'Save folder is not writable. Open Home and choose the LocalDrop folder again.';
+            logError('offline-transfer', `save-dir setup failed for ${msg.fileId}: ${errMsg}`);
             updateFile(msg.fileId, { status: 'error', error: errMsg });
             session?.sendJson({ type: 'transfer-error', message: errMsg });
             setPhase('failed');
@@ -360,6 +366,7 @@ export default function OfflineSessionScreen() {
           });
         } catch (e) {
           const errMsg = e instanceof Error ? e.message : 'Could not create writer';
+          logError('offline-transfer', `writer creation failed for ${msg.fileId}: ${errMsg}`);
           updateFile(msg.fileId, { status: 'error', error: errMsg });
           session?.sendJson({ type: 'transfer-error', message: errMsg });
           setPhase('failed');
@@ -413,6 +420,7 @@ export default function OfflineSessionScreen() {
 
         if (finalBytes < target * 0.995) {
           const errMsg = `Incomplete file: got ${formatBytes(finalBytes)} of ${formatBytes(target)}`;
+          logError('offline-transfer', `incomplete file ${msg.fileId}: ${errMsg}`);
           updateFile(msg.fileId, { status: 'error', error: errMsg });
           try {
             await entry.writer.abort();
@@ -446,6 +454,7 @@ export default function OfflineSessionScreen() {
           }
         } catch (e) {
           const errMsg = e instanceof Error ? e.message : 'Save failed';
+          logError('offline-transfer', `finish failed for ${msg.fileId}: ${errMsg}`);
           updateFile(msg.fileId, { status: 'error', error: errMsg });
           try {
             await entry.writer.abort();
@@ -495,13 +504,15 @@ export default function OfflineSessionScreen() {
         setPhase('ready');
         setError('Transfer cancelled');
       } else if (msg.type === 'transfer-error') {
+        const errMsg = msg.message || 'Transfer error';
+        logError('offline-transfer', errMsg);
         cancelledRef.current = true;
         for (const [, entry] of writersRef.current) {
           entry.writer.abort().catch(() => {});
         }
         writersRef.current.clear();
         setPhase('failed');
-        setError(msg.message || 'Transfer error');
+        setError(errMsg);
       }
     },
     [updateFile, runSend, allFilesOk, tryMarkCompleted, bytesTotal]

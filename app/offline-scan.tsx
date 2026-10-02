@@ -14,6 +14,7 @@ import {
 import { useLocalSearchParams, useRouter, useFocusEffect } from 'expo-router';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import { decodeRoomPayload } from '../src/lib/offlineSignal';
+import { logInfo, logWarn } from '../src/lib/logger';
 
 const { width: SCREEN_W } = Dimensions.get('window');
 const FRAME = Math.min(SCREEN_W * 0.72, 280);
@@ -33,7 +34,8 @@ export default function OfflineScanScreen() {
       lockedRef.current = false;
       setHint(null);
       setCameraKey((k) => k + 1);
-    }, [])
+      logInfo('qr', `scan screen open expect=${expectType}`);
+    }, [expectType])
   );
 
   const onBarcodeScanned = useCallback(
@@ -45,6 +47,10 @@ export default function OfflineScanScreen() {
       const decoded = decodeRoomPayload(data);
       if (!decoded || decoded.type !== expectType) {
         if (data.includes('{') || data.length > 40) {
+          logWarn(
+            'qr',
+            `scan mismatch expect=${expectType} got=${decoded?.type || 'invalid'} len=${data.length}`
+          );
           setHint(
             expectType === 'offer'
               ? 'Not a host room QR — try the other phone’s code.'
@@ -56,6 +62,10 @@ export default function OfflineScanScreen() {
 
       lockedRef.current = true;
       setHint(null);
+      logInfo(
+        'qr',
+        `scan ok type=${decoded.type} code=${decoded.code || '-'} name=${decoded.name || '-'}`
+      );
 
       if (expectType === 'offer') {
         (global as any).__localdropPendingOffer = data;
@@ -132,6 +142,7 @@ export default function OfflineScanScreen() {
             lockedRef.current = false;
             setHint(null);
             setCameraKey((k) => k + 1);
+            logInfo('qr', 'retry scan');
           }}
         >
           <Text style={styles.btnText}>Retry scan</Text>

@@ -106,7 +106,7 @@ export default function SendScreen() {
 
   async function startSending() {
     if (isOffline) {
-      router.push('/offline-host');
+      router.push('/offline-host' as any);
       return;
     }
 
@@ -143,7 +143,7 @@ export default function SendScreen() {
   function goToTransfer() {
     activeRoomRef.current = false;
     router.push({
-      pathname: '/transfer',
+      pathname: '/transfer' as any,
       params: {
         role: 'sender',
         peerName: peerName || 'peer',
@@ -183,7 +183,7 @@ export default function SendScreen() {
             Both phones on the same Wi‑Fi or hotspot. You will share a one-time link code (Share
             sheet), then transfer as many times as you want.
           </Text>
-          <Pressable style={styles.primaryBtn} onPress={() => router.push('/offline-host')}>
+          <Pressable style={styles.primaryBtn} onPress={() => router.push('/offline-host' as any)}>
             <Text style={styles.primaryBtnText}>Start as Host</Text>
           </Pressable>
           <Text style={styles.offlineNote}>

@@ -286,7 +286,7 @@ export default function HomeScreen() {
             style={styles.primaryButton}
             onPress={() => {
               if (Platform.OS === 'android' && !requireFolderOrAlert()) return;
-              router.push('/offline');
+              router.push('/offline' as any);
             }}
           >
             <Text style={styles.primaryButtonText}>Open Offline Transfer</Text>
@@ -321,7 +321,7 @@ export default function HomeScreen() {
           <Text style={styles.receivedTitle}>
             Files Received{totalCount > 0 ? ` (${totalCount})` : ''}
           </Text>
-          <Pressable onPress={() => router.push('/received')}>
+          <Pressable onPress={() => router.push('/received' as any)}>
             <Text style={styles.seeAll}>See all</Text>
           </Pressable>
         </View>
@@ -333,7 +333,7 @@ export default function HomeScreen() {
             <Pressable
               key={f.id}
               style={styles.receivedRow}
-              onPress={() => router.push('/received')}
+              onPress={() => router.push('/received' as any)}
             >
               <MiniThumb item={f} />
               <View style={{ flex: 1, marginLeft: 12 }}>

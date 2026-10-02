@@ -31,6 +31,7 @@ export type ProtocolMessage =
     }
   | { type: 'file-complete'; fileId: string }
   | { type: 'transfer-complete' }
+  | { type: 'transfer-ack' }
   | { type: 'transfer-cancelled' }
   | { type: 'transfer-error'; message: string };
 
@@ -47,4 +48,24 @@ export function formatBytes(bytes: number): string {
 
 export function formatSpeed(bytesPerSec: number): string {
   return `${formatBytes(bytesPerSec)}/s`;
+}
+
+export function canFinalizeTransferAsReceiver({
+  allFilesCompleted,
+  peerSentTransferComplete,
+}: {
+  allFilesCompleted: boolean;
+  peerSentTransferComplete: boolean;
+}): boolean {
+  return allFilesCompleted && peerSentTransferComplete;
+}
+
+export function canFinalizeTransferAsSender({
+  allFilesCompleted,
+  peerSentTransferAck,
+}: {
+  allFilesCompleted: boolean;
+  peerSentTransferAck: boolean;
+}): boolean {
+  return allFilesCompleted && peerSentTransferAck;
 }

@@ -27,6 +27,7 @@ import {
   formatSpeed,
   randomId,
   MAX_FILE_SIZE,
+  canFinalizeTransferAsReceiver,
 } from '../src/lib/transferProtocol';
 import {
   createStreamingWriter,
@@ -88,6 +89,8 @@ export default function OfflineSessionScreen() {
   >(new Map());
   /** Peer sent transfer-complete before our last file-complete finished. */
   const peerCompleteRef = useRef(false);
+  const awaitingTransferAckRef = useRef(false);
+  const transferAckTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     queueRef.current = queue;
@@ -121,7 +124,9 @@ export default function OfflineSessionScreen() {
     if (phaseRef.current === 'completed' || phaseRef.current === 'failed') return;
     if (!allFilesOk()) return;
     peerCompleteRef.current = false;
-    getOfflineSession()?.prepareForMore();
+    const session = getOfflineSession();
+    session?.sendJson({ type: 'transfer-ack' });
+    session?.prepareForMore();
     setPhase('completed');
   }, [allFilesOk]);
 
@@ -224,9 +229,19 @@ export default function OfflineSessionScreen() {
 
     if (completedIds.length === pending.length) {
       session.sendJson({ type: 'transfer-complete' });
-      session.prepareForMore();
-      setPhase('completed');
-      setBytesDone(total);
+      awaitingTransferAckRef.current = true;
+      if (transferAckTimerRef.current) {
+        clearTimeout(transferAckTimerRef.current);
+      }
+      transferAckTimerRef.current = setTimeout(() => {
+        if (!cancelledRef.current && awaitingTransferAckRef.current) {
+          awaitingTransferAckRef.current = false;
+          transferAckTimerRef.current = null;
+          session.prepareForMore();
+          setPhase('completed');
+          setBytesDone(total);
+        }
+      }, 5000);
     } else {
       setPhase('failed');
       setError('Transfer did not complete successfully');
@@ -421,7 +436,12 @@ export default function OfflineSessionScreen() {
           });
           writersRef.current.delete(msg.fileId);
           // If peer already sent transfer-complete, finish the turn now
-          if (peerCompleteRef.current || allFilesOk()) {
+          if (
+            canFinalizeTransferAsReceiver({
+              allFilesCompleted: allFilesOk(),
+              peerSentTransferComplete: peerCompleteRef.current,
+            })
+          ) {
             tryMarkCompleted();
           }
         } catch (e) {
@@ -439,13 +459,29 @@ export default function OfflineSessionScreen() {
         }
       } else if (msg.type === 'transfer-complete') {
         peerCompleteRef.current = true;
-        if (allFilesOk()) {
+        if (
+          canFinalizeTransferAsReceiver({
+            allFilesCompleted: allFilesOk(),
+            peerSentTransferComplete: peerCompleteRef.current,
+          })
+        ) {
           tryMarkCompleted();
         } else if (queueRef.current.some((f) => f.status === 'error')) {
           setPhase('failed');
           setError('Transfer finished with errors');
         }
         // else: still finishing last file-complete — tryMarkCompleted runs after finish()
+      } else if (msg.type === 'transfer-ack') {
+        awaitingTransferAckRef.current = false;
+        if (transferAckTimerRef.current) {
+          clearTimeout(transferAckTimerRef.current);
+          transferAckTimerRef.current = null;
+        }
+        if (!cancelledRef.current) {
+          getOfflineSession()?.prepareForMore();
+          setPhase('completed');
+          setBytesDone(bytesTotal || bytesDoneRef.current);
+        }
       } else if (msg.type === 'transfer-cancelled') {
         cancelledRef.current = true;
         for (const [, entry] of writersRef.current) {
@@ -592,6 +628,11 @@ export default function OfflineSessionScreen() {
     setError(null);
     cancelledRef.current = false;
     peerCompleteRef.current = false;
+    awaitingTransferAckRef.current = false;
+    if (transferAckTimerRef.current) {
+      clearTimeout(transferAckTimerRef.current);
+      transferAckTimerRef.current = null;
+    }
     startTimeRef.current = 0;
     for (const [, entry] of writersRef.current) {
       entry.writer.abort().catch(() => {});
@@ -626,7 +667,7 @@ export default function OfflineSessionScreen() {
             writersRef.current.clear();
             setTimeout(() => {
               clearOfflineSession();
-              router.replace('/offline');
+              router.replace('/offline' as any);
             }, 150);
           },
         },
@@ -725,7 +766,7 @@ export default function OfflineSessionScreen() {
           </Pressable>
           <Pressable
             style={[styles.primaryBtn, styles.outlineBtn]}
-            onPress={() => router.push('/received')}
+            onPress={() => router.push('/received' as any)}
           >
             <Text style={[styles.primaryBtnText, { color: '#3b82f6' }]}>
               View received files

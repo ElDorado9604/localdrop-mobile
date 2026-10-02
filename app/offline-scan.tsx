@@ -68,18 +68,18 @@ export default function OfflineScanScreen() {
       );
 
       if (expectType === 'offer') {
-        (global as any).__localdropPendingOffer = data;
+        (globalThis as any).__localdropPendingOffer = data;
         router.back();
         return;
       }
 
-      const handler = (global as any).__localdropOnAnswerScanned as
+      const handler = (globalThis as any).__localdropOnAnswerScanned as
         | ((raw: string) => void)
         | undefined;
       if (handler) {
         handler(data);
       } else {
-        (global as any).__localdropPendingAnswer = data;
+        (globalThis as any).__localdropPendingAnswer = data;
       }
       router.back();
     },
@@ -178,7 +178,7 @@ const styles = StyleSheet.create({
   },
   btnText: { color: '#fff', fontWeight: '600' },
   link: { color: '#93c5fd', marginTop: 16 },
-  mask: { ...StyleSheet.absoluteFillObject },
+  mask: { ...StyleSheet.absoluteFill },
   maskRow: { flex: 1, backgroundColor: 'rgba(0,0,0,0.55)' },
   maskMid: { height: FRAME, flexDirection: 'row' },
   maskSide: { flex: 1, backgroundColor: 'rgba(0,0,0,0.55)' },

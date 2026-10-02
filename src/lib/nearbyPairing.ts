@@ -5,12 +5,12 @@
  * Avoid flooding many directed addresses (that broke same-WiFi discovery).
  */
 import dgram from 'react-native-udp';
-import type { Socket } from 'react-native-udp';
 import { logError, logInfo, logWarn } from './logger';
 
 const PORT = 47831;
 const MAGIC = 'LDN1';
 const CHUNK = 700;
+type NearbySocket = ReturnType<typeof dgram.createSocket>;
 
 type ChunkMsg = {
   m: typeof MAGIC;
@@ -86,7 +86,7 @@ function mergeOfferMeta(
   const hasName = typeof data.name === 'string' && data.name.trim().length > 0;
   const name = hasName ? safeName(data.name) : prev?.name ?? 'Device';
   const hasCode = typeof data.code === 'string' && data.code.length > 0;
-  const code = hasCode ? data.code : prev?.code ?? '';
+  const code = hasCode ? String(data.code) : String(prev?.code ?? '');
   const addr = prev?.rinfo?.address || rinfo.address;
   return { n, name, code, rinfo: { address: addr } };
 }
@@ -105,7 +105,7 @@ export function startNearbyHost(opts: {
   onStatus?: (s: string) => void;
 }): Promise<NearbyHostResult> {
   return new Promise((resolve, reject) => {
-    let socket: Socket | null = null;
+    let socket: NearbySocket | null = null;
     let timer: ReturnType<typeof setInterval> | null = null;
     let timeout: ReturnType<typeof setTimeout> | null = null;
     let done = false;
@@ -133,9 +133,8 @@ export function startNearbyHost(opts: {
     try {
       socket = dgram.createSocket({ type: 'udp4' });
       socket.bind(PORT);
-      socket.on('listening', () => {
+      (socket as any).on('listening', () => {
         try {
-          // @ts-expect-error RN udp
           socket?.setBroadcast?.(true);
         } catch {
           /* */
@@ -181,7 +180,7 @@ export function startNearbyHost(opts: {
       const answerParts = new Map<string, Map<number, string>>();
       const answerMeta = new Map<string, { n: number; name: string }>();
 
-      socket.on('message', (msg) => {
+      (socket as any).on('message', (msg: any) => {
         if (done) return;
         try {
           const text = typeof msg === 'string' ? msg : msg.toString();
@@ -214,7 +213,7 @@ export function startNearbyHost(opts: {
         }
       });
 
-      socket.on('error', (e) => {
+      (socket as any).on('error', (e: any) => {
         if (!done) {
           done = true;
           stop();
@@ -243,7 +242,7 @@ export function startNearbyGuest(opts: {
   onStatus?: (s: string) => void;
 }): Promise<NearbyGuestResult> {
   return new Promise((resolve, reject) => {
-    let socket: Socket | null = null;
+    let socket: NearbySocket | null = null;
     let timeout: ReturnType<typeof setTimeout> | null = null;
     let done = false;
     logInfo('nearby', 'guest listening');
@@ -283,7 +282,7 @@ export function startNearbyGuest(opts: {
         { n: number; name: string; code: string; rinfo: { address: string } }
       >();
 
-      socket.on('message', (msg, rinfo) => {
+      (socket as any).on('message', (msg: any, rinfo: any) => {
         if (done) return;
         try {
           const text = typeof msg === 'string' ? msg : msg.toString();
@@ -347,7 +346,7 @@ export function startNearbyGuest(opts: {
         }
       });
 
-      socket.on('error', (e) => {
+      (socket as any).on('error', (e: any) => {
         if (!done) {
           done = true;
           stop();

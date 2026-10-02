@@ -15,11 +15,11 @@ export default function OfflineHomeScreen() {
         Connect both devices to the same Wi‑Fi or hotspot. No internet required.
       </Text>
 
-      <Pressable style={styles.primaryBtn} onPress={() => router.push('/offline-host')}>
+      <Pressable style={styles.primaryBtn} onPress={() => router.push('/offline-host' as any)}>
         <Text style={styles.primaryBtnText}>Create Room</Text>
       </Pressable>
 
-      <Pressable style={styles.secondaryBtn} onPress={() => router.push('/offline-join')}>
+      <Pressable style={styles.secondaryBtn} onPress={() => router.push('/offline-join' as any)}>
         <Text style={styles.secondaryBtnText}>Join Room</Text>
       </Pressable>
 

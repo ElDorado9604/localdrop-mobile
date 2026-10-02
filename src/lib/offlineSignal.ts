@@ -135,14 +135,12 @@ export function waitForIceComplete(pc: any, timeoutMs = 8000): Promise<void> {
       } catch {
         /* */
       }
-      // @ts-expect-error RN
       pc.onicegatheringstatechange = null;
       resolve();
     };
     const onChange = () => {
       if (pc.iceGatheringState === 'complete') done();
     };
-    // @ts-expect-error RN
     pc.onicegatheringstatechange = onChange;
     setTimeout(done, timeoutMs);
   });

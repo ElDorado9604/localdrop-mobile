@@ -26,6 +26,7 @@ import {
   formatSpeed,
   MAX_FILE_SIZE,
   randomId,
+  canFinalizeTransferAsSender,
 } from '../src/lib/transferProtocol';
 import {
   createStreamingWriter,
@@ -85,6 +86,8 @@ export default function TransferScreen() {
   const queueRef = useRef<QueuedFile[]>([]);
   const offerSentRef = useRef(false);
   const cancelledRef = useRef(false);
+  const awaitingTransferAckRef = useRef(false);
+  const transferAckTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const writersRef = useRef<
     Map<
       string,
@@ -145,6 +148,11 @@ export default function TransferScreen() {
     setSpeed(0);
     setError(null);
     setOffer(null);
+    awaitingTransferAckRef.current = false;
+    if (transferAckTimerRef.current) {
+      clearTimeout(transferAckTimerRef.current);
+      transferAckTimerRef.current = null;
+    }
     sessionRef.current?.prepareForMore();
   }, []);
 
@@ -230,9 +238,19 @@ export default function TransferScreen() {
 
     if (!cancelledRef.current && allFilesOk()) {
       session.sendJson({ type: 'transfer-complete' });
-      setPhase('completed');
-      session.prepareForMore();
-      emitRoomComplete();
+      awaitingTransferAckRef.current = true;
+      if (transferAckTimerRef.current) {
+        clearTimeout(transferAckTimerRef.current);
+      }
+      transferAckTimerRef.current = setTimeout(() => {
+        if (!cancelledRef.current && awaitingTransferAckRef.current) {
+          awaitingTransferAckRef.current = false;
+          transferAckTimerRef.current = null;
+          session.prepareForMore();
+          setPhase('completed');
+          emitRoomComplete();
+        }
+      }, 5000);
     } else if (!cancelledRef.current) {
       setPhase('failed');
       setError('Transfer did not complete successfully');
@@ -519,6 +537,27 @@ export default function TransferScreen() {
         }
       } else if (msg.type === 'transfer-complete') {
         if (allFilesOk()) {
+          const session = sessionRef.current;
+          if (session) {
+            session.sendJson({ type: 'transfer-ack' });
+          }
+          setPhase('completed');
+          sessionRef.current?.prepareForMore();
+          emitRoomComplete();
+        }
+      } else if (msg.type === 'transfer-ack') {
+        awaitingTransferAckRef.current = false;
+        if (transferAckTimerRef.current) {
+          clearTimeout(transferAckTimerRef.current);
+          transferAckTimerRef.current = null;
+        }
+        if (
+          !cancelledRef.current &&
+          canFinalizeTransferAsSender({
+            allFilesCompleted: allFilesOk(),
+            peerSentTransferAck: true,
+          })
+        ) {
           setPhase('completed');
           sessionRef.current?.prepareForMore();
           emitRoomComplete();

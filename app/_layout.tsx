@@ -9,7 +9,7 @@ import { initLogger } from '../src/lib/logger';
 function SettingsHeaderButton() {
   const router = useRouter();
   return (
-    <Pressable onPress={() => router.push('/settings')} style={{ marginRight: 8, padding: 6 }}>
+    <Pressable onPress={() => router.push('/settings' as any)} style={{ marginRight: 8, padding: 6 }}>
       <Text style={{ color: '#3b82f6', fontWeight: '600' }}>Settings</Text>
     </Pressable>
   );

@@ -69,13 +69,13 @@ export default function ReceiveScreen() {
     navigatedRef.current = true;
     activeRoomRef.current = false;
     router.replace({
-      pathname: '/transfer',
+      pathname: '/transfer' as any,
       params: {
         role: 'receiver',
         peerName: name || 'sender',
         mode: mode || 'online',
       },
-    });
+    } as any);
   }
 
   async function ensureFolder(): Promise<boolean> {
@@ -149,7 +149,7 @@ export default function ReceiveScreen() {
         <Text style={styles.hint}>
           Join a host on the same Wi‑Fi or hotspot. You will paste their offer and share your answer.
         </Text>
-        <Pressable style={styles.primaryBtn} onPress={() => router.push('/offline-join')}>
+        <Pressable style={styles.primaryBtn} onPress={() => router.push('/offline-join' as any)}>
           <Text style={styles.primaryBtnText}>Join offline host</Text>
         </Pressable>
       </View>

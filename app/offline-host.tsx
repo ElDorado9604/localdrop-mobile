@@ -72,15 +72,15 @@ export default function OfflineHostScreen() {
 
   useFocusEffect(
     useCallback(() => {
-      (global as any).__localdropOnAnswerScanned = onAnswerScanned;
-      const pending = (global as any).__localdropPendingAnswer as string | undefined;
+      (globalThis as any).__localdropOnAnswerScanned = onAnswerScanned;
+      const pending = (globalThis as any).__localdropPendingAnswer as string | undefined;
       if (pending) {
-        (global as any).__localdropPendingAnswer = undefined;
+        (globalThis as any).__localdropPendingAnswer = undefined;
         onAnswerScanned(pending);
       }
       return () => {
-        if ((global as any).__localdropOnAnswerScanned === onAnswerScanned) {
-          (global as any).__localdropOnAnswerScanned = undefined;
+        if ((globalThis as any).__localdropOnAnswerScanned === onAnswerScanned) {
+          (globalThis as any).__localdropOnAnswerScanned = undefined;
         }
         nearbyStopRef.current?.();
       };
@@ -111,7 +111,7 @@ export default function OfflineHostScreen() {
             roomCode: codeRef.current,
             isHost: true,
           });
-          router.replace({ pathname: '/offline-session', params: { role: 'host' } });
+          router.replace({ pathname: '/offline-session' as any, params: { role: 'host' } } as any);
         },
         onFailed: (reason) => {
           setError(reason);
@@ -160,7 +160,7 @@ export default function OfflineHostScreen() {
             roomCode: codeRef.current,
             isHost: true,
           });
-          router.replace({ pathname: '/offline-session', params: { role: 'host' } });
+          router.replace({ pathname: '/offline-session' as any, params: { role: 'host' } } as any);
         },
         onFailed: (reason) => {
           setError(reason);
@@ -243,7 +243,7 @@ export default function OfflineHostScreen() {
           nearbyStopRef.current?.();
           sessionRef.current?.close();
           startedRef.current = false;
-          router.replace('/offline');
+          router.replace('/offline' as any);
         },
       },
     ]);
@@ -301,9 +301,9 @@ export default function OfflineHostScreen() {
             style={styles.primaryBtn}
             onPress={() =>
               router.push({
-                pathname: '/offline-scan',
+                pathname: '/offline-scan' as any,
                 params: { mode: 'answer' },
-              })
+              } as any)
             }
           >
             <Text style={styles.primaryBtnText}>Scan answer QR</Text>

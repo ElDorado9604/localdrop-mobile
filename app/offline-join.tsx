@@ -35,9 +35,9 @@ export default function OfflineJoinScreen() {
 
   useFocusEffect(
     useCallback(() => {
-      const pending = (global as any).__localdropPendingOffer as string | undefined;
+      const pending = (globalThis as any).__localdropPendingOffer as string | undefined;
       if (pending) {
-        (global as any).__localdropPendingOffer = undefined;
+        (globalThis as any).__localdropPendingOffer = undefined;
         void applyOfferRaw(pending);
       }
       return () => {
@@ -71,7 +71,7 @@ export default function OfflineJoinScreen() {
             roomCode: decoded.code,
             isHost: false,
           });
-          router.replace({ pathname: '/offline-session', params: { role: 'join' } });
+          router.replace({ pathname: '/offline-session' as any, params: { role: 'join' } } as any);
         },
         onFailed: (reason) => {
           setError(reason);
@@ -123,7 +123,7 @@ export default function OfflineJoinScreen() {
             roomCode: decoded.code,
             isHost: false,
           });
-          router.replace({ pathname: '/offline-session', params: { role: 'join' } });
+          router.replace({ pathname: '/offline-session' as any, params: { role: 'join' } } as any);
         },
         onFailed: (reason) => {
           setError(reason);
@@ -160,7 +160,7 @@ export default function OfflineJoinScreen() {
           subtitle="Both devices need the same Wi‑Fi or hotspot. Choose how to pair."
           onSelect={(m) => {
             if (m === 'qr') {
-              router.push({ pathname: '/offline-scan', params: { mode: 'offer' } });
+              router.push({ pathname: '/offline-scan' as any, params: { mode: 'offer' } } as any);
             }
             if (m === 'ble') void startNearbyJoin();
           }}

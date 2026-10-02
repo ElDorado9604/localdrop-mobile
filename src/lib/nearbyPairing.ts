@@ -6,6 +6,7 @@
  */
 import dgram from 'react-native-udp';
 import type { Socket } from 'react-native-udp';
+import { logError, logInfo, logWarn } from './logger';
 
 const PORT = 47831;
 const MAGIC = 'LDN1';
@@ -64,10 +65,6 @@ function safeName(n?: string): string {
   return t.length > 0 ? t.slice(0, 40) : 'Device';
 }
 
-/**
- * Merge chunk meta without wiping a real name/code when later chunks
- * (which omit name/code) arrive out of order.
- */
 function mergeAnswerMeta(
   prev: { n: number; name: string } | undefined,
   data: ChunkMsg
@@ -90,7 +87,6 @@ function mergeOfferMeta(
   const name = hasName ? safeName(data.name) : prev?.name ?? 'Device';
   const hasCode = typeof data.code === 'string' && data.code.length > 0;
   const code = hasCode ? data.code : prev?.code ?? '';
-  // Prefer the first address we saw; unicast answer back to host
   const addr = prev?.rinfo?.address || rinfo.address;
   return { n, name, code, rinfo: { address: addr } };
 }
@@ -119,6 +115,7 @@ export function startNearbyHost(opts: {
       name: hostName,
       code: opts.code,
     });
+    logInfo('nearby', `host start code=${opts.code} name=${hostName} chunks=${chunks.length}`);
 
     const stop = () => {
       if (timer) clearInterval(timer);
@@ -150,12 +147,10 @@ export function startNearbyHost(opts: {
           for (const c of chunks) {
             const buf = JSON.stringify(c);
             try {
-              // Primary: global broadcast (works on most same-WiFi LANs)
               socket?.send(buf, 0, buf.length, PORT, '255.255.255.255');
             } catch {
               /* */
             }
-            // Light hotspot help: try Android soft-AP subnet occasionally
             if (tick % 3 === 0) {
               try {
                 socket?.send(buf, 0, buf.length, PORT, '192.168.43.255');
@@ -173,6 +168,7 @@ export function startNearbyHost(opts: {
           if (!done) {
             done = true;
             stop();
+            logWarn('nearby', 'host timeout — no answer');
             reject(
               new Error(
                 'No device joined. Same Wi‑Fi/hotspot required. Keep screens on, or use QR.'
@@ -195,7 +191,6 @@ export function startNearbyHost(opts: {
           if (!answerParts.has(data.id)) answerParts.set(data.id, new Map());
           answerParts.get(data.id)!.set(data.i, data.p);
 
-          // Merge meta: name only on chunk 0 — never overwrite a real name with "Device"
           if (data.n != null || data.name != null) {
             answerMeta.set(data.id, mergeAnswerMeta(answerMeta.get(data.id), data));
           }
@@ -208,6 +203,7 @@ export function startNearbyHost(opts: {
 
           done = true;
           stop();
+          logInfo('nearby', `host got answer peer=${meta.name}`);
           resolve({
             answerRaw: full,
             peerName: meta.name,
@@ -222,11 +218,13 @@ export function startNearbyHost(opts: {
         if (!done) {
           done = true;
           stop();
+          logError('nearby', `host socket error: ${e}`);
           reject(e);
         }
       });
     } catch (e) {
       stop();
+      logError('nearby', `host setup error: ${e}`);
       reject(e);
     }
   });
@@ -248,6 +246,7 @@ export function startNearbyGuest(opts: {
     let socket: Socket | null = null;
     let timeout: ReturnType<typeof setTimeout> | null = null;
     let done = false;
+    logInfo('nearby', 'guest listening');
 
     const stop = () => {
       if (timeout) clearTimeout(timeout);
@@ -269,6 +268,7 @@ export function startNearbyGuest(opts: {
         if (!done) {
           done = true;
           stop();
+          logWarn('nearby', 'guest timeout — no offer');
           reject(
             new Error(
               'No room found. Same Wi‑Fi/hotspot required. Keep screens on, or use QR.'
@@ -293,7 +293,6 @@ export function startNearbyGuest(opts: {
           if (!offerParts.has(data.id)) offerParts.set(data.id, new Map());
           offerParts.get(data.id)!.set(data.i, data.p);
 
-          // Merge meta: name/code only on chunk 0 — never wipe with defaults
           if (data.n != null || data.name != null || data.code != null) {
             offerMeta.set(
               data.id,
@@ -312,6 +311,10 @@ export function startNearbyGuest(opts: {
           done = true;
           if (timeout) clearTimeout(timeout);
           const hostAddr = meta.rinfo.address;
+          logInfo(
+            'nearby',
+            `guest found offer host=${meta.name} code=${meta.code} addr=${hostAddr}`
+          );
 
           resolve({
             offerRaw: full,
@@ -322,15 +325,14 @@ export function startNearbyGuest(opts: {
               const guestName = safeName(name);
               const aid = makeId();
               const chunks = splitPayload(aid, 'answer', answerRaw, { name: guestName });
+              logInfo('nearby', `guest sendAnswer name=${guestName} chunks=${chunks.length}`);
               let rounds = 0;
               const t = setInterval(() => {
                 rounds++;
                 for (const c of chunks) {
                   const buf = JSON.stringify(c);
                   try {
-                    // Unicast to host first (critical for hotspot)
                     socket?.send(buf, 0, buf.length, PORT, hostAddr);
-                    // Broadcast fallback
                     socket?.send(buf, 0, buf.length, PORT, '255.255.255.255');
                   } catch {
                     /* */
@@ -349,11 +351,13 @@ export function startNearbyGuest(opts: {
         if (!done) {
           done = true;
           stop();
+          logError('nearby', `guest socket error: ${e}`);
           reject(e);
         }
       });
     } catch (e) {
       stop();
+      logError('nearby', `guest setup error: ${e}`);
       reject(e);
     }
   });

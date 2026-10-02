@@ -12,6 +12,7 @@ import {
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { joinRoom, cancelRoom, getSocket } from '../src/lib/socket';
 import { hasSaveDirectory, setupPublicSaveFolder } from '../src/lib/saveReceivedFile';
+import { getDisplayName } from '../src/lib/deviceName';
 
 export default function ReceiveScreen() {
   const { mode } = useLocalSearchParams<{ mode: string }>();
@@ -116,7 +117,8 @@ export default function ReceiveScreen() {
     setError(null);
     setStatus('joining');
 
-    const res = await joinRoom(trimmed, 'Android Device');
+    const displayName = await getDisplayName();
+    const res = await joinRoom(trimmed, displayName);
 
     if ('error' in res) {
       setError(res.error);

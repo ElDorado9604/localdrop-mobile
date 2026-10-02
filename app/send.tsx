@@ -14,6 +14,7 @@ import * as DocumentPicker from 'expo-document-picker';
 import { createRoom, cancelRoom, getSocket } from '../src/lib/socket';
 import { randomId } from '../src/lib/transferProtocol';
 import { buildJoinUrl } from '../src/lib/config';
+import { getDisplayName } from '../src/lib/deviceName';
 
 type FileInfo = {
   id: string;
@@ -81,7 +82,6 @@ export default function SendScreen() {
 
   async function pickFiles() {
     try {
-      // Stream from original URI — sender does not need free space ≈ file size
       const result = await DocumentPicker.getDocumentAsync({
         multiple: true,
         copyToCacheDirectory: false,
@@ -118,7 +118,8 @@ export default function SendScreen() {
     setError(null);
     setStatus('creating');
 
-    const res = await createRoom('Android Device');
+    const displayName = await getDisplayName();
+    const res = await createRoom(displayName);
     if ('error' in res) {
       setError(res.error);
       setStatus('idle');

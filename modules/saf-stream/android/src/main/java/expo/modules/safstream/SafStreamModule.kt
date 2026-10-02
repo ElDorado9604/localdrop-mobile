@@ -1,5 +1,6 @@
 package expo.modules.safstream
 
+import android.content.Intent
 import android.net.Uri
 import android.util.Base64
 import expo.modules.kotlin.modules.Module
@@ -15,6 +16,24 @@ class SafStreamModule : Module() {
   private val streams = ConcurrentHashMap<String, OutputStream>()
   private val inputs = ConcurrentHashMap<String, InputStream>()
 
+  /** Prefer activity context so temporary DocumentPicker grants are visible. */
+  private fun resolverContext(): android.content.Context {
+    val activity = appContext.currentActivity
+    if (activity != null) return activity
+    return appContext.reactContext
+      ?: throw Exception("React context is not available")
+  }
+
+  private fun tryTakeReadPermission(uri: Uri) {
+    try {
+      val ctx = resolverContext()
+      val flags = Intent.FLAG_GRANT_READ_URI_PERMISSION
+      ctx.contentResolver.takePersistableUriPermission(uri, flags)
+    } catch (_: Exception) {
+      // Temporary grants are often not persistable — ignore
+    }
+  }
+
   override fun definition() = ModuleDefinition {
     Name("SafStream")
 
@@ -23,9 +42,7 @@ class SafStreamModule : Module() {
      * Returns a streamId used for subsequent write/close/abort calls.
      */
     AsyncFunction("open") { documentUri: String ->
-      val context = appContext.reactContext
-        ?: throw Exception("React context is not available")
-
+      val context = resolverContext()
       val uri = Uri.parse(documentUri)
       // "wt" = truncate + write (fresh file from createFileAsync)
       val raw = context.contentResolver.openOutputStream(uri, "wt")
@@ -81,8 +98,8 @@ class SafStreamModule : Module() {
 
       if (!documentUri.isNullOrBlank()) {
         try {
-          val context = appContext.reactContext
-          context?.contentResolver?.delete(Uri.parse(documentUri), null, null)
+          val context = resolverContext()
+          context.contentResolver.delete(Uri.parse(documentUri), null, null)
         } catch (_: Exception) {
           // ignore delete failures
         }
@@ -93,14 +110,32 @@ class SafStreamModule : Module() {
 
     /**
      * Open a readable InputStream for any content:// or file document URI.
+     * Uses activity ContentResolver when available so picker grants apply.
      */
     AsyncFunction("openInput") { documentUri: String ->
-      val context = appContext.reactContext
-        ?: throw Exception("React context is not available")
-
+      val context = resolverContext()
       val uri = Uri.parse(documentUri)
-      val raw = context.contentResolver.openInputStream(uri)
-        ?: throw Exception("Could not open InputStream for $documentUri")
+      tryTakeReadPermission(uri)
+
+      val raw = try {
+        context.contentResolver.openInputStream(uri)
+      } catch (e: SecurityException) {
+        // Retry once via react context if activity path failed
+        val fallback = appContext.reactContext
+        if (fallback != null && fallback !== context) {
+          try {
+            fallback.contentResolver.openInputStream(uri)
+          } catch (e2: Exception) {
+            throw Exception(
+              "Permission denied reading file. Re-pick the file from the system picker. (${e.message})"
+            )
+          }
+        } else {
+          throw Exception(
+            "Permission denied reading file. Re-pick the file from the system picker. (${e.message})"
+          )
+        }
+      } ?: throw Exception("Could not open InputStream for $documentUri")
 
       val stream: InputStream = BufferedInputStream(raw, 256 * 1024)
       val id = UUID.randomUUID().toString()

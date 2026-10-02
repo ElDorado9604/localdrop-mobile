@@ -9,6 +9,8 @@ import {
   Alert,
   Image,
   ActivityIndicator,
+  TextInput,
+  Modal,
 } from 'react-native';
 import { Link, useFocusEffect, useRouter } from 'expo-router';
 import {
@@ -20,6 +22,12 @@ import {
   testSaveFolder,
   type ReceivedFileRecord,
 } from '../src/lib/saveReceivedFile';
+import {
+  getDisplayName,
+  getDefaultDeviceName,
+  setDisplayName,
+  clearDisplayName,
+} from '../src/lib/deviceName';
 
 type Mode = 'online' | 'offline';
 
@@ -74,6 +82,10 @@ export default function HomeScreen() {
   const [folderOk, setFolderOk] = useState(false);
   const [folderLabel, setFolderLabel] = useState('LocalDrop');
   const [testing, setTesting] = useState(false);
+  const [deviceName, setDeviceNameState] = useState<string>('');
+  const [nameModal, setNameModal] = useState(false);
+  const [nameDraft, setNameDraft] = useState('');
+  const [defaultName, setDefaultName] = useState('');
   const router = useRouter();
 
   const refresh = useCallback(async () => {
@@ -93,6 +105,10 @@ export default function HomeScreen() {
     const list = await listReceivedFiles();
     setTotalCount(list.length);
     setRecent(list.slice(0, 5));
+
+    const [display, def] = await Promise.all([getDisplayName(), getDefaultDeviceName()]);
+    setDeviceNameState(display);
+    setDefaultName(def);
   }, []);
 
   useFocusEffect(
@@ -100,6 +116,28 @@ export default function HomeScreen() {
       void refresh();
     }, [refresh])
   );
+
+  function openNameEditor() {
+    setNameDraft(deviceName);
+    setNameModal(true);
+  }
+
+  async function saveName() {
+    const clean = nameDraft.trim().slice(0, 40);
+    if (!clean) {
+      await clearDisplayName();
+    } else {
+      await setDisplayName(clean);
+    }
+    setNameModal(false);
+    await refresh();
+  }
+
+  async function resetName() {
+    await clearDisplayName();
+    setNameModal(false);
+    await refresh();
+  }
 
   async function chooseFolder() {
     Alert.alert(
@@ -161,6 +199,17 @@ export default function HomeScreen() {
       <Text style={styles.subtitle}>
         Fast peer-to-peer file transfer on the same network
       </Text>
+
+      <Pressable style={styles.nameBanner} onPress={openNameEditor}>
+        <View style={{ flex: 1 }}>
+          <Text style={styles.nameLabel}>This device</Text>
+          <Text style={styles.nameValue} numberOfLines={1}>
+            {deviceName || '…'}
+          </Text>
+          <Text style={styles.nameHint}>Shown when you send or join a room</Text>
+        </View>
+        <Text style={styles.nameEdit}>Edit</Text>
+      </Pressable>
 
       <View
         style={[
@@ -299,6 +348,36 @@ export default function HomeScreen() {
           ))
         )}
       </View>
+
+      <Modal visible={nameModal} transparent animationType="fade">
+        <View style={styles.modalBackdrop}>
+          <View style={styles.modalCard}>
+            <Text style={styles.modalTitle}>Device name</Text>
+            <Text style={styles.modalBody}>
+              Others see this name when you join or send. Max 40 characters.
+            </Text>
+            <TextInput
+              style={styles.modalInput}
+              value={nameDraft}
+              onChangeText={(t) => setNameDraft(t.slice(0, 40))}
+              placeholder={defaultName || 'My phone'}
+              placeholderTextColor="#666"
+              autoFocus
+              maxLength={40}
+            />
+            <Text style={styles.modalDefault}>Default: {defaultName}</Text>
+            <Pressable style={styles.folderBtn} onPress={() => void saveName()}>
+              <Text style={styles.folderBtnText}>Save</Text>
+            </Pressable>
+            <Pressable style={styles.folderBtnSecondary} onPress={() => void resetName()}>
+              <Text style={styles.folderBtnSecondaryText}>Use device default</Text>
+            </Pressable>
+            <Pressable onPress={() => setNameModal(false)}>
+              <Text style={styles.modalCancel}>Cancel</Text>
+            </Pressable>
+          </View>
+        </View>
+      </Modal>
     </ScrollView>
   );
 }
@@ -318,8 +397,22 @@ const styles = StyleSheet.create({
     fontSize: 16,
     color: '#a0a0a0',
     textAlign: 'center',
-    marginBottom: 20,
+    marginBottom: 16,
   },
+  nameBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#141414',
+    borderRadius: 14,
+    padding: 16,
+    marginBottom: 16,
+    borderWidth: 1,
+    borderColor: '#2a2a2a',
+  },
+  nameLabel: { color: '#888', fontSize: 12, marginBottom: 2 },
+  nameValue: { color: '#fff', fontSize: 17, fontWeight: '700' },
+  nameHint: { color: '#666', fontSize: 11, marginTop: 4 },
+  nameEdit: { color: '#3b82f6', fontWeight: '700', marginLeft: 12 },
   folderBanner: {
     borderRadius: 14,
     padding: 16,
@@ -350,6 +443,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     borderWidth: 1,
     borderColor: '#3b82f6',
+    marginTop: 8,
   },
   folderBtnSecondaryText: { color: '#3b82f6', fontWeight: '600', fontSize: 14 },
   modeContainer: { marginBottom: 28 },
@@ -444,4 +538,37 @@ const styles = StyleSheet.create({
   },
   miniIconVideo: { backgroundColor: '#1e3a5f' },
   miniIconText: { color: '#94a3b8', fontSize: 10, fontWeight: '700' },
+  modalBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.7)',
+    justifyContent: 'center',
+    padding: 24,
+  },
+  modalCard: {
+    backgroundColor: '#1a1a1a',
+    borderRadius: 16,
+    padding: 20,
+    borderWidth: 1,
+    borderColor: '#333',
+  },
+  modalTitle: { color: '#fff', fontSize: 18, fontWeight: '700', marginBottom: 8 },
+  modalBody: { color: '#94a3b8', fontSize: 13, marginBottom: 12, lineHeight: 18 },
+  modalInput: {
+    backgroundColor: '#0f0f0f',
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#333',
+    color: '#fff',
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    fontSize: 16,
+    marginBottom: 8,
+  },
+  modalDefault: { color: '#666', fontSize: 12, marginBottom: 12 },
+  modalCancel: {
+    color: '#888',
+    textAlign: 'center',
+    marginTop: 14,
+    fontWeight: '600',
+  },
 });

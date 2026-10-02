@@ -11,6 +11,7 @@ import {
   isWebRTCAvailable,
 } from './webrtc';
 import { waitForIceComplete } from './offlineSignal';
+import { logError, logInfo, logVerbose, logWarn } from './logger';
 
 type SignalHandler = (type: 'offer' | 'answer' | 'ice-candidate', payload: any) => void;
 
@@ -54,12 +55,14 @@ export class WebRTCSession {
   private notifyClosed() {
     if (this.closedNotified) return;
     this.closedNotified = true;
+    logInfo('webrtc', 'channel/pc closed');
     this.onClose?.();
   }
 
   private notifyFailed(reason: string) {
     if (this.completed || this.closedNotified) return;
     this.closedNotified = true;
+    logError('webrtc', `failed: ${reason}`);
     this.onFailed?.(reason);
   }
 
@@ -67,7 +70,10 @@ export class WebRTCSession {
     this.channel = channel;
     channel.binaryType = 'arraybuffer';
 
-    channel.onopen = () => this.onOpen?.();
+    channel.onopen = () => {
+      logInfo('webrtc', 'data channel open');
+      this.onOpen?.();
+    };
     channel.onclose = () => this.notifyClosed();
     channel.onerror = () => {
       this.notifyFailed('Data channel error');
@@ -76,37 +82,44 @@ export class WebRTCSession {
       this.onMessage?.(event.data);
     };
 
-    if (channel.readyState === 'open') this.onOpen?.();
+    if (channel.readyState === 'open') {
+      logInfo('webrtc', 'data channel already open');
+      this.onOpen?.();
+    }
   }
 
   private ensurePc(asInitiator: boolean) {
     if (this.pc) return this.pc;
 
+    logInfo('webrtc', `pc create initiator=${asInitiator}`);
     this.pc = createPeerConnection(
       (candidate) => {
         this.onSignal('ice-candidate', candidate.toJSON ? candidate.toJSON() : candidate);
       },
       (state) => {
-        // iceConnectionState from createPeerConnection callback
+        logVerbose('webrtc', `iceConnectionState=${state}`);
         if (state === 'failed') {
           this.notifyFailed(
             'Could not establish a direct link. Put both devices on the same Wi-Fi and try again.'
           );
         } else if (state === 'disconnected' || state === 'closed') {
-          // Peer left / link dropped — surface as close so UI leaves "Connected"
           this.notifyClosed();
+        } else if (state === 'connected' || state === 'completed') {
+          logInfo('webrtc', `ice ${state}`);
         }
       }
     );
 
-    // Also watch connectionState (more reliable for peer leave on some devices)
     try {
       this.pc.addEventListener?.('connectionstatechange', () => {
         const st = this.pc?.connectionState;
+        logVerbose('webrtc', `connectionState=${st}`);
         if (st === 'failed') {
           this.notifyFailed('Connection failed. Reconnect both devices.');
         } else if (st === 'disconnected' || st === 'closed') {
           this.notifyClosed();
+        } else if (st === 'connected') {
+          logInfo('webrtc', 'connectionState=connected');
         }
       });
     } catch {
@@ -127,6 +140,7 @@ export class WebRTCSession {
     const pc = this.ensurePc(true);
     const offer = await pc.createOffer({});
     await pc.setLocalDescription(offer);
+    logInfo('webrtc', 'offer created (online)');
     this.onSignal('offer', offer);
     return offer;
   }
@@ -135,7 +149,9 @@ export class WebRTCSession {
     const pc = this.ensurePc(true);
     const offer = await pc.createOffer({});
     await pc.setLocalDescription(offer);
+    logInfo('webrtc', 'offer local set, waiting ICE for QR');
     await waitForIceComplete(pc);
+    logInfo('webrtc', 'offer ICE complete for QR');
     return pc.localDescription;
   }
 
@@ -146,6 +162,7 @@ export class WebRTCSession {
     await this.flushIce();
     const answer = await pc.createAnswer();
     await pc.setLocalDescription(answer);
+    logInfo('webrtc', 'answer created (online)');
     this.onSignal('answer', answer);
     return answer;
   }
@@ -157,15 +174,21 @@ export class WebRTCSession {
     await this.flushIce();
     const answer = await pc.createAnswer();
     await pc.setLocalDescription(answer);
+    logInfo('webrtc', 'answer local set, waiting ICE for QR');
     await waitForIceComplete(pc);
+    logInfo('webrtc', 'answer ICE complete for QR');
     return pc.localDescription;
   }
 
   async handleAnswer(sdp: any) {
     if (!this.pc) return;
-    if (this.pc.signalingState === 'stable') return;
+    if (this.pc.signalingState === 'stable') {
+      logWarn('webrtc', 'handleAnswer skipped (already stable)');
+      return;
+    }
     await this.pc.setRemoteDescription(new RTCSessionDescription(sdp));
     this.remoteSet = true;
+    logInfo('webrtc', 'remote answer set');
     await this.flushIce();
   }
 
@@ -188,6 +211,8 @@ export class WebRTCSession {
   }
 
   private async flushIce() {
+    const n = this.pendingIce.length;
+    if (n) logVerbose('webrtc', `flush ${n} pending ICE`);
     for (const c of this.pendingIce) {
       try {
         await this.pc.addIceCandidate(new RTCIceCandidate(c));
@@ -254,12 +279,12 @@ export class WebRTCSession {
   prepareForMore() {
     this.completed = false;
     this.closedNotified = false;
+    logVerbose('webrtc', 'prepareForMore');
   }
 
   close() {
     this.completed = true;
-    // Do not notify closed to local handlers when we intentionally leave
-    // (remote peer still gets channel/pc close events).
+    logInfo('webrtc', 'session close()');
     try {
       this.channel?.close();
     } catch {

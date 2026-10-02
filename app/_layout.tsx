@@ -1,8 +1,18 @@
 import { useEffect } from 'react';
-import { Stack } from 'expo-router';
+import { Pressable, Text } from 'react-native';
+import { Stack, useRouter } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { initLocalDropStorage } from '../src/lib/saveReceivedFile';
+
+function SettingsHeaderButton() {
+  const router = useRouter();
+  return (
+    <Pressable onPress={() => router.push('/settings')} style={{ marginRight: 8, padding: 6 }}>
+      <Text style={{ color: '#3b82f6', fontWeight: '600' }}>Settings</Text>
+    </Pressable>
+  );
+}
 
 export default function RootLayout() {
   useEffect(() => {
@@ -20,7 +30,14 @@ export default function RootLayout() {
           contentStyle: { backgroundColor: '#0f0f0f' },
         }}
       >
-        <Stack.Screen name="index" options={{ title: 'LocalDrop' }} />
+        <Stack.Screen
+          name="index"
+          options={{
+            title: 'LocalDrop',
+            headerRight: () => <SettingsHeaderButton />,
+          }}
+        />
+        <Stack.Screen name="settings" options={{ title: 'Settings' }} />
         <Stack.Screen name="send" options={{ title: 'Send Files' }} />
         <Stack.Screen name="receive" options={{ title: 'Receive Files' }} />
         <Stack.Screen name="transfer" options={{ title: 'Transfer' }} />

@@ -14,7 +14,6 @@ import {
   Platform,
 } from 'react-native';
 import { useRouter, useFocusEffect } from 'expo-router';
-import * as Clipboard from 'expo-clipboard';
 import {
   getCacheCopySmallFiles,
   setCacheCopySmallFiles,
@@ -50,13 +49,10 @@ export default function SettingsScreen() {
       let alive = true;
       (async () => {
         await initLogger();
-        const [v, verb] = await Promise.all([
-          getCacheCopySmallFiles(),
-          Promise.resolve(isVerboseLogging()),
-        ]);
+        const v = await getCacheCopySmallFiles();
         if (alive) {
           setCacheCopy(v);
-          setVerbose(verb);
+          setVerbose(isVerboseLogging());
           setLoading(false);
           refreshLogs();
         }
@@ -82,9 +78,9 @@ export default function SettingsScreen() {
     refreshLogs();
     const text = formatLogsForExport(getLogEntries());
     try {
-      // expo-clipboard may not be installed — fall back to Share
       try {
-        // @ts-expect-error optional
+        // Optional dependency — avoid hard require in package.json
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
         const ClipboardMod = require('expo-clipboard');
         if (ClipboardMod?.setStringAsync) {
           await ClipboardMod.setStringAsync(text);
@@ -92,7 +88,7 @@ export default function SettingsScreen() {
           return;
         }
       } catch {
-        /* */
+        /* share fallback */
       }
       await Share.share({ message: text });
     } catch {

@@ -1,8 +1,8 @@
 /**
  * Memory-safe chunked file I/O for LocalDrop.
- * Sender: stream from content:// / file:// (no full cache copy).
+ * Sender: native ContentResolver InputStream for content:// (no cache copy).
  * Receiver (Android SAF): native ContentResolver OutputStream (200 GB capable).
- * Fallback: Expo FileHandle / small cache stage when native module missing.
+ * No readAsStringAsync on content:// URIs.
  */
 
 import * as FileSystemLegacy from 'expo-file-system/legacy';
@@ -15,9 +15,12 @@ import {
   writeSafStream,
   closeSafStream,
   abortSafStream,
+  openSafInputStream,
+  readSafInputStreamBase64,
+  closeSafInputStream,
 } from 'saf-stream';
 
-const CACHE_STAGE_MAX = 100 * 1024 * 1024; // 100 MB fallback only
+const CACHE_STAGE_MAX = 100 * 1024 * 1024; // 100 MB receive-only fallback
 
 function base64ToArrayBuffer(b64: string): ArrayBuffer {
   const binary = atob(b64);
@@ -27,18 +30,10 @@ function base64ToArrayBuffer(b64: string): ArrayBuffer {
   return bytes.buffer;
 }
 
-function arrayBufferToBase64(buf: ArrayBuffer): string {
-  const bytes = new Uint8Array(buf);
-  let binary = '';
-  const step = 0x8000;
-  for (let i = 0; i < bytes.length; i += step) {
-    binary += String.fromCharCode(...bytes.subarray(i, i + step));
-  }
-  return btoa(binary);
-}
-
 /**
  * Stream a file in binary chunks. Constant memory.
+ * content:// → native openInputStream (required on Android).
+ * file:// → FileHandle, then legacy only for file:// paths.
  * @param chunkSize defaults to offline 256 KB; pass ONLINE_CHUNK_SIZE (64 KB) for web-compatible online sends
  */
 export async function streamFileChunks(
@@ -50,6 +45,51 @@ export async function streamFileChunks(
 ): Promise<void> {
   const readChunk = Math.max(16 * 1024, chunkSize);
 
+  // ——— Native SAF / ContentResolver input (Android content://) ———
+  if (
+    Platform.OS === 'android' &&
+    uri.startsWith('content://') &&
+    isSafStreamAvailable()
+  ) {
+    let streamId: string | null = null;
+    try {
+      streamId = await openSafInputStream(uri);
+      let offset = 0;
+      let index = 0;
+      while (offset < fileSize) {
+        if (signal?.cancelled) throw new Error('Transfer cancelled');
+        const toRead = Math.min(readChunk, fileSize - offset);
+        const b64 = await readSafInputStreamBase64(streamId, toRead);
+        if (!b64) break;
+        const buf = base64ToArrayBuffer(b64);
+        if (buf.byteLength === 0) break;
+        await onChunk(buf, offset, index);
+        offset += buf.byteLength;
+        index++;
+      }
+      if (offset === 0 && fileSize > 0) {
+        throw new Error('Could not read file (empty stream). Try picking the file again.');
+      }
+      return;
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      throw new Error(
+        msg.includes('not available') || msg.includes('Rebuild')
+          ? msg
+          : `Cannot read this file. ${msg}`
+      );
+    } finally {
+      if (streamId) {
+        try {
+          await closeSafInputStream(streamId);
+        } catch {
+          /* */
+        }
+      }
+    }
+  }
+
+  // ——— Expo FileHandle (file:// and some content://) ———
   try {
     const file = new File(uri);
     if (typeof file.open === 'function') {
@@ -82,9 +122,17 @@ export async function streamFileChunks(
       }
     }
   } catch {
-    // Fall through
+    // Fall through only for non-content URIs
   }
 
+  // Never use readAsStringAsync on content:// (Invalid URI on many SAF docs)
+  if (uri.startsWith('content://')) {
+    throw new Error(
+      'Cannot read this file from storage. Rebuild the app with the latest native module, then try again.'
+    );
+  }
+
+  // Legacy path only for file:// (and similar)
   let offset = 0;
   let index = 0;
   while (offset < fileSize) {

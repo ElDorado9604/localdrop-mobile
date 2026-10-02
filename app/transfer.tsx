@@ -6,8 +6,10 @@ import {
   Pressable,
   ScrollView,
   ActivityIndicator,
+  Alert,
 } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
+import * as DocumentPicker from 'expo-document-picker';
 import {
   getSocket,
   sendSignal,
@@ -23,6 +25,7 @@ import {
   formatBytes,
   formatSpeed,
   MAX_FILE_SIZE,
+  randomId,
 } from '../src/lib/transferProtocol';
 import {
   createStreamingWriter,
@@ -55,7 +58,7 @@ export default function TransferScreen() {
     filesJson?: string;
   }>();
   const router = useRouter();
-  const role = (params.role as 'sender' | 'receiver') || 'sender';
+  const initialRole = (params.role as 'sender' | 'receiver') || 'sender';
   const peerName = params.peerName || 'peer';
   const mode = params.mode || 'online';
 
@@ -73,6 +76,9 @@ export default function TransferScreen() {
   } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [saveHint, setSaveHint] = useState<string | null>(null);
+  const [titleRole, setTitleRole] = useState<'sender' | 'receiver' | 'idle'>(
+    initialRole === 'sender' ? 'sender' : 'receiver'
+  );
 
   const sessionRef = useRef<WebRTCSession | null>(null);
   const startTimeRef = useRef(0);
@@ -90,7 +96,6 @@ export default function TransferScreen() {
       }
     >
   >(new Map());
-  /** Serialize data-channel handling so file-complete never races ahead of writes */
   const msgQueueRef = useRef<Promise<void>>(Promise.resolve());
 
   useEffect(() => {
@@ -102,7 +107,7 @@ export default function TransferScreen() {
   }, []);
 
   useEffect(() => {
-    if (role === 'sender' && params.filesJson) {
+    if (initialRole === 'sender' && params.filesJson) {
       try {
         const files = JSON.parse(params.filesJson as string) as QueuedFile[];
         const normalized = files.map((f) => ({
@@ -116,7 +121,7 @@ export default function TransferScreen() {
         setError('Could not load file list');
       }
     }
-  }, [role, params.filesJson]);
+  }, [initialRole, params.filesJson]);
 
   const updateFile = useCallback((id: string, patch: Partial<QueuedFile>) => {
     setQueue((prev) => {
@@ -129,6 +134,18 @@ export default function TransferScreen() {
   const allFilesOk = useCallback(() => {
     const q = queueRef.current;
     return q.length > 0 && q.every((f) => f.status === 'completed');
+  }, []);
+
+  const resetTurn = useCallback(() => {
+    cancelledRef.current = false;
+    offerSentRef.current = false;
+    startTimeRef.current = 0;
+    setBytesDone(0);
+    setBytesTotal(0);
+    setSpeed(0);
+    setError(null);
+    setOffer(null);
+    sessionRef.current?.prepareForMore();
   }, []);
 
   const runSend = useCallback(async () => {
@@ -150,6 +167,7 @@ export default function TransferScreen() {
       }
     }
 
+    setTitleRole('sender');
     setPhase('transferring');
     emitTransferStarted();
     startTimeRef.current = Date.now();
@@ -213,7 +231,7 @@ export default function TransferScreen() {
     if (!cancelledRef.current && allFilesOk()) {
       session.sendJson({ type: 'transfer-complete' });
       setPhase('completed');
-      session.markCompleted();
+      session.prepareForMore();
       emitRoomComplete();
     } else if (!cancelledRef.current) {
       setPhase('failed');
@@ -226,7 +244,7 @@ export default function TransferScreen() {
     if (!session || !session.isChannelOpen()) return;
     if (offerSentRef.current) return;
 
-    const pending = queueRef.current.filter((f) => f.status === 'pending');
+    const pending = queueRef.current.filter((f) => f.status === 'pending' && f.uri);
     if (pending.length === 0) return;
 
     const displayName = await getDisplayName();
@@ -239,6 +257,7 @@ export default function TransferScreen() {
     const totalSize = metas.reduce((s, m) => s + m.size, 0);
     setBytesTotal(totalSize);
     offerSentRef.current = true;
+    setTitleRole('sender');
 
     const ok = session.sendJson({
       type: 'transfer-offer',
@@ -253,6 +272,70 @@ export default function TransferScreen() {
     }
     setPhase('transferring');
   }, []);
+
+  const pickAndSend = useCallback(async () => {
+    const session = sessionRef.current;
+    if (!session?.isChannelOpen()) {
+      Alert.alert('Not connected', 'Connection is closed. Go back and pair again.');
+      return;
+    }
+    try {
+      const result = await DocumentPicker.getDocumentAsync({
+        multiple: true,
+        copyToCacheDirectory: false,
+      });
+      if (result.canceled || !result.assets?.length) return;
+
+      const files: QueuedFile[] = result.assets.map((a) => ({
+        id: randomId(),
+        name: a.name,
+        size: a.size ?? 0,
+        type: a.mimeType || 'application/octet-stream',
+        uri: a.uri,
+        status: 'pending',
+        progress: 0,
+      }));
+
+      const tooBig = files.find((f) => f.size > MAX_FILE_SIZE);
+      if (tooBig) {
+        Alert.alert('File too large', `"${tooBig.name}" exceeds the 200 GB limit.`);
+        return;
+      }
+
+      resetTurn();
+      setQueue(files);
+      queueRef.current = files;
+      setSaveHint(null);
+      setTitleRole('sender');
+
+      // Offer immediately
+      const displayName = await getDisplayName();
+      const metas: FileMeta[] = files.map((f) => ({
+        id: f.id,
+        name: f.name,
+        size: f.size,
+        type: f.type,
+      }));
+      const totalSize = metas.reduce((s, m) => s + m.size, 0);
+      setBytesTotal(totalSize);
+      offerSentRef.current = true;
+
+      const ok = session.sendJson({
+        type: 'transfer-offer',
+        files: metas,
+        totalSize,
+        senderName: displayName,
+      });
+      if (!ok) {
+        offerSentRef.current = false;
+        setError('Data channel not ready');
+        return;
+      }
+      setPhase('transferring');
+    } catch {
+      Alert.alert('Error', 'Could not pick files');
+    }
+  }, [resetTurn]);
 
   const handleProtocol = useCallback(
     async (data: ArrayBuffer | string) => {
@@ -303,6 +386,8 @@ export default function TransferScreen() {
           senderName: msg.senderName || 'Peer',
         });
         setBytesTotal(msg.totalSize);
+        setBytesDone(0);
+        setTitleRole('receiver');
         setPhase('offering');
         setQueue(
           msg.files.map((f) => ({
@@ -317,10 +402,12 @@ export default function TransferScreen() {
       } else if (msg.type === 'transfer-accepted') {
         void runSend();
       } else if (msg.type === 'transfer-rejected') {
-        setPhase('failed');
+        offerSentRef.current = false;
+        setPhase('ready');
         setError('Receiver declined the transfer.');
       } else if (msg.type === 'file-start') {
         const totalChunks = Math.ceil(msg.size / ONLINE_CHUNK_SIZE) || 1;
+        setTitleRole('receiver');
 
         if (!(await ensureWritableSaveDirectory())) {
           const ok = await setupPublicSaveFolder();
@@ -433,7 +520,7 @@ export default function TransferScreen() {
       } else if (msg.type === 'transfer-complete') {
         if (allFilesOk()) {
           setPhase('completed');
-          sessionRef.current?.markCompleted();
+          sessionRef.current?.prepareForMore();
           emitRoomComplete();
         }
       } else if (msg.type === 'transfer-cancelled') {
@@ -446,7 +533,7 @@ export default function TransferScreen() {
           }
         }
         writersRef.current.clear();
-        setPhase('failed');
+        setPhase('ready');
         setError('Transfer cancelled.');
       } else if (msg.type === 'transfer-error') {
         setPhase('failed');
@@ -483,7 +570,7 @@ export default function TransferScreen() {
       onOpen: () => {
         setPhase('ready');
         setError(null);
-        if (role === 'sender') {
+        if (initialRole === 'sender' && queueRef.current.some((f) => f.uri)) {
           setTimeout(() => void sendTransferOffer(), 400);
         }
       },
@@ -492,7 +579,10 @@ export default function TransferScreen() {
           .then(() => handleProtocol(data))
           .catch(() => {});
       },
-      onClose: () => {},
+      onClose: () => {
+        setError('Connection closed');
+        setPhase('failed');
+      },
       onFailed: (reason) => {
         setError(reason);
         setPhase('failed');
@@ -524,9 +614,9 @@ export default function TransferScreen() {
       }
     }
 
-    if (role === 'sender') {
+    if (initialRole === 'sender') {
       setTimeout(() => void session.createOffer(), 500);
-    } else if (role === 'receiver' && mode === 'online') {
+    } else if (initialRole === 'receiver' && mode === 'online') {
       const fallback = setTimeout(() => {
         if (!session.isChannelOpen() && sessionRef.current) {
           void session.createOffer();
@@ -559,6 +649,7 @@ export default function TransferScreen() {
     setOffer(null);
     setPhase('transferring');
     startTimeRef.current = Date.now();
+    setTitleRole('receiver');
   }
 
   function rejectOffer() {
@@ -570,9 +661,24 @@ export default function TransferScreen() {
   const progress =
     bytesTotal > 0 ? Math.min(100, Math.round((bytesDone / bytesTotal) * 100)) : 0;
 
+  const canSendMore =
+    (phase === 'ready' || phase === 'completed' || phase === 'failed') &&
+    sessionRef.current?.isChannelOpen();
+
+  const heading =
+    phase === 'transferring'
+      ? titleRole === 'sender'
+        ? 'Sending'
+        : 'Receiving'
+      : phase === 'completed'
+        ? 'Connected'
+        : titleRole === 'sender'
+          ? 'Sending'
+          : 'Receiving';
+
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.content}>
-      <Text style={styles.title}>{role === 'sender' ? 'Sending' : 'Receiving'}</Text>
+      <Text style={styles.title}>{heading}</Text>
       <Text style={styles.peer}>Peer: {peerName}</Text>
       <Text style={styles.wifiHint}>Both devices must be on the same Wi‑Fi (not 4G/5G).</Text>
 
@@ -586,13 +692,11 @@ export default function TransferScreen() {
       {phase === 'ready' && (
         <View style={styles.center}>
           <Text style={styles.ready}>Connected — ready to transfer</Text>
-          {role === 'sender' && (
-            <Pressable style={styles.primaryBtn} onPress={() => void sendTransferOffer()}>
-              <Text style={styles.primaryBtnText}>Send Files</Text>
-            </Pressable>
-          )}
-          {role === 'receiver' && (
-            <Text style={styles.hint}>Waiting for sender to start...</Text>
+          <Pressable style={styles.primaryBtn} onPress={() => void pickAndSend()}>
+            <Text style={styles.primaryBtnText}>Send Files</Text>
+          </Pressable>
+          {initialRole === 'receiver' && (
+            <Text style={styles.hint}>Or wait for the other device to send...</Text>
           )}
         </View>
       )}
@@ -663,6 +767,12 @@ export default function TransferScreen() {
       {saveHint ? <Text style={styles.saveHint}>{saveHint}</Text> : null}
       {error ? <Text style={styles.error}>{error}</Text> : null}
 
+      {canSendMore && (
+        <Pressable style={styles.primaryBtn} onPress={() => void pickAndSend()}>
+          <Text style={styles.primaryBtnText}>Send Files</Text>
+        </Pressable>
+      )}
+
       <Pressable style={styles.backBtn} onPress={() => router.back()}>
         <Text style={styles.primaryBtnText}>Go Back</Text>
       </Pressable>
@@ -690,7 +800,7 @@ const styles = StyleSheet.create({
   center: { alignItems: 'center', paddingVertical: 24 },
   status: { color: '#a0a0a0', marginTop: 12 },
   ready: { color: '#fff', fontSize: 16, marginBottom: 16 },
-  hint: { color: '#888', marginTop: 8 },
+  hint: { color: '#888', marginTop: 12, textAlign: 'center' },
   offerBox: {
     backgroundColor: '#1a1a1a',
     borderRadius: 14,
@@ -756,13 +866,16 @@ const styles = StyleSheet.create({
     paddingVertical: 14,
     paddingHorizontal: 24,
     alignItems: 'center',
+    marginBottom: 12,
   },
   primaryBtnText: { color: '#fff', fontWeight: '700', fontSize: 16 },
   backBtn: {
-    backgroundColor: '#3b82f6',
+    backgroundColor: '#222',
     borderRadius: 14,
     paddingVertical: 16,
     alignItems: 'center',
     marginTop: 8,
+    borderWidth: 1,
+    borderColor: '#444',
   },
 });

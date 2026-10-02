@@ -1,7 +1,8 @@
 /**
  * Camera QR scanner — scan only (no share/paste).
+ * Handler stays attached while camera is open; lock with ref to avoid missed scans.
  */
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useRef } from 'react';
 import {
   View,
   Text,
@@ -22,21 +23,59 @@ export default function OfflineScanScreen() {
   const { mode } = useLocalSearchParams<{ mode: string }>();
   const router = useRouter();
   const [permission, requestPermission] = useCameraPermissions();
-  const [scanned, setScanned] = useState(false);
-  const [cameraReady, setCameraReady] = useState(false);
   const [cameraKey, setCameraKey] = useState(0);
+  const [hint, setHint] = useState<string | null>(null);
 
+  const lockedRef = useRef(false);
   const expectType = mode === 'answer' ? 'answer' : 'offer';
 
   useFocusEffect(
     useCallback(() => {
-      setScanned(false);
-      setCameraReady(false);
+      lockedRef.current = false;
+      setHint(null);
       setCameraKey((k) => k + 1);
-      return () => {
-        setCameraReady(false);
-      };
     }, [])
+  );
+
+  const onBarcodeScanned = useCallback(
+    (result: { data?: string }) => {
+      if (lockedRef.current) return;
+      const data = result?.data;
+      if (!data || typeof data !== 'string') return;
+
+      const decoded = decodeRoomPayload(data);
+      if (!decoded || decoded.type !== expectType) {
+        // Soft feedback once — do not lock so user can retry another QR
+        if (data.includes('{') || data.length > 40) {
+          setHint(
+            expectType === 'offer'
+              ? 'Not a host room QR — try the other phone’s code.'
+              : 'Not a guest answer QR — try the other phone’s code.'
+          );
+        }
+        return;
+      }
+
+      lockedRef.current = true;
+      setHint(null);
+
+      if (expectType === 'offer') {
+        (global as any).__localdropPendingOffer = data;
+        router.back();
+        return;
+      }
+
+      const handler = (global as any).__localdropOnAnswerScanned as
+        | ((raw: string) => void)
+        | undefined;
+      if (handler) {
+        handler(data);
+      } else {
+        (global as any).__localdropPendingAnswer = data;
+      }
+      router.back();
+    },
+    [expectType, router]
   );
 
   if (!permission) {
@@ -61,58 +100,17 @@ export default function OfflineScanScreen() {
     );
   }
 
-  function onBarcode({ data }: { data: string }) {
-    if (scanned || !cameraReady || !data) return;
-    const decoded = decodeRoomPayload(data);
-    if (!decoded || decoded.type !== expectType) {
-      if (data.includes('{') || data.length > 40) {
-        Alert.alert(
-          'Invalid QR code',
-          expectType === 'offer'
-            ? 'Scan the host’s room QR code.'
-            : 'Scan the guest’s answer QR code.'
-        );
-      }
-      return;
-    }
-    setScanned(true);
-
-    if (expectType === 'offer') {
-      (global as any).__localdropPendingOffer = data;
-      router.back();
-      return;
-    }
-
-    const handler = (global as any).__localdropOnAnswerScanned as
-      | ((raw: string) => void)
-      | undefined;
-    if (handler) {
-      handler(data);
-    } else {
-      (global as any).__localdropPendingAnswer = data;
-    }
-    router.back();
-  }
-
   return (
     <View style={styles.container}>
       <CameraView
         key={cameraKey}
         style={styles.camera}
         facing="back"
-        active
-        onCameraReady={() => setCameraReady(true)}
         barcodeScannerSettings={{
           barcodeTypes: ['qr'],
         }}
-        onBarcodeScanned={scanned || !cameraReady ? undefined : onBarcode}
+        onBarcodeScanned={lockedRef.current ? undefined : onBarcodeScanned}
       />
-
-      {!cameraReady && (
-        <View style={styles.loadingOverlay}>
-          <Text style={styles.text}>Starting camera…</Text>
-        </View>
-      )}
 
       <View style={styles.mask} pointerEvents="none">
         <View style={styles.maskRow} />
@@ -129,7 +127,18 @@ export default function OfflineScanScreen() {
           {expectType === 'offer' ? 'Scan host room QR' : 'Scan guest answer QR'}
         </Text>
         <Text style={styles.tip}>Point at the QR on the other phone</Text>
-        <Pressable style={styles.btn} onPress={() => router.back()}>
+        {hint ? <Text style={styles.hint}>{hint}</Text> : null}
+        <Pressable
+          style={styles.btn}
+          onPress={() => {
+            lockedRef.current = false;
+            setHint(null);
+            setCameraKey((k) => k + 1);
+          }}
+        >
+          <Text style={styles.btnText}>Retry scan</Text>
+        </Pressable>
+        <Pressable style={[styles.btn, styles.btnSecondary]} onPress={() => router.back()}>
           <Text style={styles.btnText}>Cancel</Text>
         </Pressable>
       </View>
@@ -140,12 +149,6 @@ export default function OfflineScanScreen() {
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#000' },
   camera: { flex: 1, width: '100%' },
-  loadingOverlay: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: '#111',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
   center: {
     flex: 1,
     backgroundColor: '#0f0f0f',
@@ -160,6 +163,9 @@ const styles = StyleSheet.create({
     paddingHorizontal: 24,
     borderRadius: 12,
     marginTop: 12,
+  },
+  btnSecondary: {
+    backgroundColor: '#333',
   },
   btnText: { color: '#fff', fontWeight: '600' },
   link: { color: '#93c5fd', marginTop: 16 },
@@ -199,5 +205,12 @@ const styles = StyleSheet.create({
     fontSize: 12,
     marginBottom: 4,
     textAlign: 'center',
+  },
+  hint: {
+    color: '#fbbf24',
+    fontSize: 12,
+    textAlign: 'center',
+    marginTop: 8,
+    paddingHorizontal: 12,
   },
 });

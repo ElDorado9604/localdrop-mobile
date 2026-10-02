@@ -4,13 +4,16 @@ import android.net.Uri
 import android.util.Base64
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
+import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
+import java.io.InputStream
 import java.io.OutputStream
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 
 class SafStreamModule : Module() {
   private val streams = ConcurrentHashMap<String, OutputStream>()
+  private val inputs = ConcurrentHashMap<String, InputStream>()
 
   override fun definition() = ModuleDefinition {
     Name("SafStream")
@@ -83,6 +86,50 @@ class SafStreamModule : Module() {
         } catch (_: Exception) {
           // ignore delete failures
         }
+      }
+    }
+
+    // ——— Input (sender read from content:// SAF / MediaStore) ———
+
+    /**
+     * Open a readable InputStream for any content:// or file document URI.
+     */
+    AsyncFunction("openInput") { documentUri: String ->
+      val context = appContext.reactContext
+        ?: throw Exception("React context is not available")
+
+      val uri = Uri.parse(documentUri)
+      val raw = context.contentResolver.openInputStream(uri)
+        ?: throw Exception("Could not open InputStream for $documentUri")
+
+      val stream: InputStream = BufferedInputStream(raw, 256 * 1024)
+      val id = UUID.randomUUID().toString()
+      inputs[id] = stream
+      id
+    }
+
+    /**
+     * Read up to maxBytes from an open input stream.
+     * Returns base64 payload (empty string = EOF).
+     */
+    AsyncFunction("readInputBase64") { streamId: String, maxBytes: Int ->
+      val stream = inputs[streamId]
+        ?: throw Exception("Input stream not open: $streamId")
+      val limit = maxBytes.coerceIn(1, 512 * 1024)
+      val buf = ByteArray(limit)
+      val n = stream.read(buf)
+      if (n <= 0) {
+        return@AsyncFunction ""
+      }
+      Base64.encodeToString(buf, 0, n, Base64.NO_WRAP)
+    }
+
+    AsyncFunction("closeInput") { streamId: String ->
+      val stream = inputs.remove(streamId) ?: return@AsyncFunction
+      try {
+        stream.close()
+      } catch (_: Exception) {
+        // ignore
       }
     }
   }

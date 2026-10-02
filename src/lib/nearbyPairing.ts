@@ -64,6 +64,37 @@ function safeName(n?: string): string {
   return t.length > 0 ? t.slice(0, 40) : 'Device';
 }
 
+/**
+ * Merge chunk meta without wiping a real name/code when later chunks
+ * (which omit name/code) arrive out of order.
+ */
+function mergeAnswerMeta(
+  prev: { n: number; name: string } | undefined,
+  data: ChunkMsg
+): { n: number; name: string } {
+  const n = data.n != null ? data.n : prev?.n ?? 0;
+  const hasName = typeof data.name === 'string' && data.name.trim().length > 0;
+  const name = hasName ? safeName(data.name) : prev?.name ?? 'Device';
+  return { n, name };
+}
+
+function mergeOfferMeta(
+  prev:
+    | { n: number; name: string; code: string; rinfo: { address: string } }
+    | undefined,
+  data: ChunkMsg,
+  rinfo: { address: string }
+): { n: number; name: string; code: string; rinfo: { address: string } } {
+  const n = data.n != null ? data.n : prev?.n ?? 0;
+  const hasName = typeof data.name === 'string' && data.name.trim().length > 0;
+  const name = hasName ? safeName(data.name) : prev?.name ?? 'Device';
+  const hasCode = typeof data.code === 'string' && data.code.length > 0;
+  const code = hasCode ? data.code : prev?.code ?? '';
+  // Prefer the first address we saw; unicast answer back to host
+  const addr = prev?.rinfo?.address || rinfo.address;
+  return { n, name, code, rinfo: { address: addr } };
+}
+
 export type NearbyHostResult = {
   answerRaw: string;
   peerName: string;
@@ -163,15 +194,15 @@ export function startNearbyHost(opts: {
 
           if (!answerParts.has(data.id)) answerParts.set(data.id, new Map());
           answerParts.get(data.id)!.set(data.i, data.p);
-          if (data.n != null) {
-            answerMeta.set(data.id, {
-              n: data.n,
-              name: safeName(data.name),
-            });
+
+          // Merge meta: name only on chunk 0 — never overwrite a real name with "Device"
+          if (data.n != null || data.name != null) {
+            answerMeta.set(data.id, mergeAnswerMeta(answerMeta.get(data.id), data));
           }
+
           const meta = answerMeta.get(data.id);
           const parts = answerParts.get(data.id)!;
-          if (!meta) return;
+          if (!meta || !meta.n) return;
           const full = reassemble(parts, meta.n);
           if (!full) return;
 
@@ -261,17 +292,20 @@ export function startNearbyGuest(opts: {
 
           if (!offerParts.has(data.id)) offerParts.set(data.id, new Map());
           offerParts.get(data.id)!.set(data.i, data.p);
-          if (data.n != null) {
-            offerMeta.set(data.id, {
-              n: data.n,
-              name: safeName(data.name),
-              code: data.code || '',
-              rinfo: { address: rinfo.address },
-            });
+
+          // Merge meta: name/code only on chunk 0 — never wipe with defaults
+          if (data.n != null || data.name != null || data.code != null) {
+            offerMeta.set(
+              data.id,
+              mergeOfferMeta(offerMeta.get(data.id), data, {
+                address: rinfo.address,
+              })
+            );
           }
+
           const meta = offerMeta.get(data.id);
           const parts = offerParts.get(data.id)!;
-          if (!meta) return;
+          if (!meta || !meta.n) return;
           const full = reassemble(parts, meta.n);
           if (!full) return;
 

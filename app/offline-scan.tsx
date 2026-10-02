@@ -1,6 +1,6 @@
 /**
  * Camera QR scanner — scan only (no share/paste).
- * Handler stays attached while camera is open; lock with ref to avoid missed scans.
+ * Handler always attached; lockedRef prevents double-fire.
  */
 import { useState, useCallback, useRef } from 'react';
 import {
@@ -8,7 +8,6 @@ import {
   Text,
   StyleSheet,
   Pressable,
-  Alert,
   Dimensions,
   Platform,
 } from 'react-native';
@@ -45,7 +44,6 @@ export default function OfflineScanScreen() {
 
       const decoded = decodeRoomPayload(data);
       if (!decoded || decoded.type !== expectType) {
-        // Soft feedback once — do not lock so user can retry another QR
         if (data.includes('{') || data.length > 40) {
           setHint(
             expectType === 'offer'
@@ -109,7 +107,7 @@ export default function OfflineScanScreen() {
         barcodeScannerSettings={{
           barcodeTypes: ['qr'],
         }}
-        onBarcodeScanned={lockedRef.current ? undefined : onBarcodeScanned}
+        onBarcodeScanned={onBarcodeScanned}
       />
 
       <View style={styles.mask} pointerEvents="none">

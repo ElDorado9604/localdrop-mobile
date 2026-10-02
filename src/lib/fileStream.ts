@@ -1,6 +1,7 @@
 /**
  * Memory-safe chunked file I/O for LocalDrop.
- * Sender: native ContentResolver InputStream for content:// (no cache copy).
+ * Sender: native ContentResolver InputStream for content:// (no full-file cache by default).
+ * Optional: full-file cache copy for ≤200 MB when settings allow and native open fails.
  * Receiver (Android SAF): native ContentResolver OutputStream (200 GB capable).
  * No readAsStringAsync on content:// URIs.
  */
@@ -19,6 +20,7 @@ import {
   readSafInputStreamBase64,
   closeSafInputStream,
 } from 'saf-stream';
+import { getCacheCopySmallFiles, CACHE_COPY_MAX_BYTES } from './settings';
 
 const CACHE_STAGE_MAX = 100 * 1024 * 1024; // 100 MB receive-only fallback
 
@@ -30,10 +32,120 @@ function base64ToArrayBuffer(b64: string): ArrayBuffer {
   return bytes.buffer;
 }
 
+async function streamFromFileUri(
+  uri: string,
+  fileSize: number,
+  onChunk: (chunk: ArrayBuffer, offset: number, index: number) => Promise<void>,
+  signal: { cancelled: boolean } | undefined,
+  readChunk: number
+): Promise<void> {
+  try {
+    const file = new File(uri);
+    if (typeof file.open === 'function') {
+      const handle = file.open(FileMode.ReadOnly);
+      try {
+        handle.offset = 0;
+        let offset = 0;
+        let index = 0;
+        while (offset < fileSize) {
+          if (signal?.cancelled) throw new Error('Transfer cancelled');
+          const toRead = Math.min(readChunk, fileSize - offset);
+          const data = await handle.readBytes(toRead);
+          if (!data || data.byteLength === 0) break;
+          await onChunk(
+            data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength),
+            offset,
+            index
+          );
+          offset += data.byteLength;
+          index++;
+          handle.offset = offset;
+        }
+        return;
+      } finally {
+        try {
+          handle.close();
+        } catch {
+          /* */
+        }
+      }
+    }
+  } catch {
+    /* fall through */
+  }
+
+  if (uri.startsWith('content://')) {
+    throw new Error(
+      'Cannot read this file from storage. Rebuild the app with the latest native module, then try again.'
+    );
+  }
+
+  let offset = 0;
+  let index = 0;
+  while (offset < fileSize) {
+    if (signal?.cancelled) throw new Error('Transfer cancelled');
+    const length = Math.min(readChunk, fileSize - offset);
+    const b64 = await FileSystemLegacy.readAsStringAsync(uri, {
+      encoding: FileSystemLegacy.EncodingType.Base64,
+      position: offset,
+      length,
+    });
+    if (!b64) break;
+    const buf = base64ToArrayBuffer(b64);
+    await onChunk(buf, offset, index);
+    offset += buf.byteLength;
+    index++;
+  }
+}
+
 /**
- * Stream a file in binary chunks. Constant memory.
+ * If native content:// open fails and settings allow, copy once into app cache
+ * (only for files ≤ CACHE_COPY_MAX_BYTES), stream, then delete the copy.
+ */
+async function tryCacheCopyAndStream(
+  uri: string,
+  fileSize: number,
+  onChunk: (chunk: ArrayBuffer, offset: number, index: number) => Promise<void>,
+  signal: { cancelled: boolean } | undefined,
+  readChunk: number
+): Promise<boolean> {
+  if (fileSize <= 0 || fileSize > CACHE_COPY_MAX_BYTES) return false;
+  const allowed = await getCacheCopySmallFiles();
+  if (!allowed) return false;
+
+  const cacheDir =
+    FileSystemLegacy.cacheDirectory || FileSystemLegacy.documentDirectory || '';
+  if (!cacheDir) return false;
+
+  const dest = `${cacheDir}localdrop_send_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  try {
+    await FileSystemLegacy.copyAsync({ from: uri, to: dest });
+  } catch {
+    try {
+      // Some content:// URIs need StorageAccessFramework-style access via native only
+      return false;
+    } catch {
+      return false;
+    }
+  }
+
+  try {
+    await streamFromFileUri(dest, fileSize, onChunk, signal, readChunk);
+    return true;
+  } finally {
+    try {
+      await FileSystemLegacy.deleteAsync(dest, { idempotent: true });
+    } catch {
+      /* */
+    }
+  }
+}
+
+/**
+ * Stream a file in binary chunks. Constant memory when native open works.
  * content:// → native openInputStream (required on Android).
- * file:// → FileHandle, then legacy only for file:// paths.
+ * On permission failure: optional full-file cache for ≤200 MB if settings allow.
+ * file:// → FileHandle / legacy.
  * @param chunkSize defaults to offline 256 KB; pass ONLINE_CHUNK_SIZE (64 KB) for web-compatible online sends
  */
 export async function streamFileChunks(
@@ -73,6 +185,37 @@ export async function streamFileChunks(
       return;
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
+      const isPerm =
+        /Permission|denied|SecurityException|obtain access|OPEN_DOCUMENT/i.test(msg);
+
+      if (isPerm) {
+        try {
+          if (streamId) {
+            await closeSafInputStream(streamId);
+            streamId = null;
+          }
+        } catch {
+          /* */
+        }
+        const usedCache = await tryCacheCopyAndStream(
+          uri,
+          fileSize,
+          onChunk,
+          signal,
+          readChunk
+        );
+        if (usedCache) return;
+
+        if (fileSize > CACHE_COPY_MAX_BYTES) {
+          throw new Error(
+            'Cannot read this large file from storage (permission). Re-pick the file, or move it into a folder LocalDrop can access. Full cache copy is not used for files over 200 MB.'
+          );
+        }
+        throw new Error(
+          'Cannot read this file (permission). Re-pick it from the system picker. Or enable "Cache copy for small files" in Settings (Home) for files up to 200 MB.'
+        );
+      }
+
       throw new Error(
         msg.includes('not available') || msg.includes('Rebuild')
           ? msg
@@ -89,66 +232,7 @@ export async function streamFileChunks(
     }
   }
 
-  // ——— Expo FileHandle (file:// and some content://) ———
-  try {
-    const file = new File(uri);
-    if (typeof file.open === 'function') {
-      const handle = file.open(FileMode.ReadOnly);
-      try {
-        handle.offset = 0;
-        let offset = 0;
-        let index = 0;
-        while (offset < fileSize) {
-          if (signal?.cancelled) throw new Error('Transfer cancelled');
-          const toRead = Math.min(readChunk, fileSize - offset);
-          const data = await handle.readBytes(toRead);
-          if (!data || data.byteLength === 0) break;
-          await onChunk(
-            data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength),
-            offset,
-            index
-          );
-          offset += data.byteLength;
-          index++;
-          handle.offset = offset;
-        }
-        return;
-      } finally {
-        try {
-          handle.close();
-        } catch {
-          /* */
-        }
-      }
-    }
-  } catch {
-    // Fall through only for non-content URIs
-  }
-
-  // Never use readAsStringAsync on content:// (Invalid URI on many SAF docs)
-  if (uri.startsWith('content://')) {
-    throw new Error(
-      'Cannot read this file from storage. Rebuild the app with the latest native module, then try again.'
-    );
-  }
-
-  // Legacy path only for file:// (and similar)
-  let offset = 0;
-  let index = 0;
-  while (offset < fileSize) {
-    if (signal?.cancelled) throw new Error('Transfer cancelled');
-    const length = Math.min(readChunk, fileSize - offset);
-    const b64 = await FileSystemLegacy.readAsStringAsync(uri, {
-      encoding: FileSystemLegacy.EncodingType.Base64,
-      position: offset,
-      length,
-    });
-    if (!b64) break;
-    const buf = base64ToArrayBuffer(b64);
-    await onChunk(buf, offset, index);
-    offset += buf.byteLength;
-    index++;
-  }
+  await streamFromFileUri(uri, fileSize, onChunk, signal, readChunk);
 }
 
 export type ReceivedFileWriter = {

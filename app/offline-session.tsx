@@ -28,7 +28,9 @@ import {
   randomId,
   MAX_FILE_SIZE,
   canFinalizeTransferAsReceiver,
+  describeTransferStart,
 } from '../src/lib/transferProtocol';
+import { getCacheCopySmallFiles } from '../src/lib/settings';
 import {
   createStreamingWriter,
   ensureWritableSaveDirectory,
@@ -38,7 +40,7 @@ import { streamFileChunks } from '../src/lib/fileStream';
 import type { ReceivedFileWriter } from '../src/lib/fileStream';
 import { getDisplayName } from '../src/lib/deviceName';
 import { setTransferKeepAwake } from '../src/lib/keepTransferAwake';
-import { logError, logWarn } from '../src/lib/logger';
+import { logError, logInfo, logWarn } from '../src/lib/logger';
 
 type QueuedFile = {
   id: string;
@@ -92,6 +94,11 @@ export default function OfflineSessionScreen() {
   const peerCompleteRef = useRef(false);
   const awaitingTransferAckRef = useRef(false);
   const transferAckTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const logTransferStart = useCallback(async (role: 'sender' | 'receiver') => {
+    const enabled = await getCacheCopySmallFiles();
+    logInfo('offline-transfer', `start ${describeTransferStart(role, enabled)}`);
+  }, []);
 
   useEffect(() => {
     queueRef.current = queue;
@@ -152,6 +159,7 @@ export default function OfflineSessionScreen() {
       }
     }
 
+    await logTransferStart('sender');
     setPhase('transferring');
     cancelledRef.current = false;
     startTimeRef.current = Date.now();
@@ -303,6 +311,7 @@ export default function OfflineSessionScreen() {
       }
 
       if (msg.type === 'transfer-offer') {
+        await logTransferStart('receiver');
         setOffer({
           files: msg.files,
           totalSize: msg.totalSize,

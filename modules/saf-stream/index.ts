@@ -48,7 +48,25 @@ export async function writeSafStream(streamId: string, data: ArrayBuffer | Uint8
   const mod = getNative();
   if (!mod) throw new Error('SafStream native module is not available');
   const bytes = data instanceof Uint8Array ? data : new Uint8Array(data);
-  return mod.write(streamId, bytes);
+  let offset = 0;
+  let total = 0;
+
+  while (offset < bytes.length) {
+    const remaining = bytes.length - offset;
+    const slice = bytes.subarray(offset, offset + Math.min(remaining, 256 * 1024));
+    const written = await mod.write(streamId, slice);
+    if (!Number.isFinite(written) || written <= 0) {
+      throw new Error(`Partial SAF write failed: wrote ${total} of ${bytes.length} bytes`);
+    }
+    offset += written;
+    total += written;
+  }
+
+  if (total !== bytes.length) {
+    throw new Error(`Partial SAF write: wrote ${total} of ${bytes.length} bytes`);
+  }
+
+  return total;
 }
 
 export async function writeSafStreamBase64(streamId: string, base64: string): Promise<number> {

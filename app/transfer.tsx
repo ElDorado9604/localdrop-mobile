@@ -27,7 +27,9 @@ import {
   MAX_FILE_SIZE,
   randomId,
   canFinalizeTransferAsSender,
+  describeTransferStart,
 } from '../src/lib/transferProtocol';
+import { getCacheCopySmallFiles } from '../src/lib/settings';
 import {
   createStreamingWriter,
   ensureAppLocalDropDir,
@@ -102,6 +104,11 @@ export default function TransferScreen() {
   >(new Map());
   const msgQueueRef = useRef<Promise<void>>(Promise.resolve());
 
+  const logTransferStart = useCallback(async (role: 'sender' | 'receiver') => {
+    const enabled = await getCacheCopySmallFiles();
+    logInfo('transfer', `start ${describeTransferStart(role, enabled)}`);
+  }, []);
+
   useEffect(() => {
     queueRef.current = queue;
   }, [queue]);
@@ -109,6 +116,10 @@ export default function TransferScreen() {
   useEffect(() => {
     void ensureAppLocalDropDir();
   }, []);
+
+  useEffect(() => {
+    void logTransferStart(initialRole);
+  }, [initialRole, logTransferStart]);
 
   useEffect(() => {
     if (initialRole === 'sender' && params.filesJson) {
@@ -180,6 +191,7 @@ export default function TransferScreen() {
       }
     }
 
+    await logTransferStart('sender');
     setTitleRole('sender');
     setPhase('transferring');
     emitTransferStarted();
@@ -409,6 +421,7 @@ export default function TransferScreen() {
       }
 
       if (msg.type === 'transfer-offer') {
+        await logTransferStart('receiver');
         setOffer({
           files: msg.files,
           totalSize: msg.totalSize,

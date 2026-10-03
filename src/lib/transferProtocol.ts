@@ -50,6 +50,20 @@ export function formatSpeed(bytesPerSec: number): string {
   return `${formatBytes(bytesPerSec)}/s`;
 }
 
+export type TransferRole = 'sender' | 'receiver';
+
+export function describeTransferRole(role: TransferRole): string {
+  return `device-role=${role}`;
+}
+
+export function describeCacheCopyState(enabled: boolean): string {
+  return `cache-copy=${enabled ? 'on' : 'off'}`;
+}
+
+export function describeTransferStart(role: TransferRole, cacheCopyEnabled: boolean): string {
+  return `${describeTransferRole(role)} ${describeCacheCopyState(cacheCopyEnabled)}`;
+}
+
 export function canFinalizeTransferAsReceiver({
   allFilesCompleted,
   peerSentTransferComplete,

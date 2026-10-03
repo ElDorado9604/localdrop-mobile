@@ -7,6 +7,7 @@ import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
+import java.io.ByteArrayOutputStream
 import java.io.InputStream
 import java.io.OutputStream
 import java.util.UUID
@@ -61,7 +62,13 @@ class SafStreamModule : Module() {
     AsyncFunction("write") { streamId: String, data: ByteArray ->
       val stream = streams[streamId]
         ?: throw Exception("Stream not open: $streamId")
-      stream.write(data)
+      var offset = 0
+      while (offset < data.size) {
+        val remaining = data.size - offset
+        val chunkSize = minOf(remaining, 256 * 1024)
+        stream.write(data, offset, chunkSize)
+        offset += chunkSize
+      }
       data.size
     }
 
@@ -151,12 +158,23 @@ class SafStreamModule : Module() {
       val stream = inputs[streamId]
         ?: throw Exception("Input stream not open: $streamId")
       val limit = maxBytes.coerceIn(1, 512 * 1024)
-      val buf = ByteArray(limit)
-      val n = stream.read(buf)
-      if (n <= 0) {
+      val out = ByteArrayOutputStream(limit)
+      var total = 0
+
+      while (total < limit) {
+        val remaining = limit - total
+        val buf = ByteArray(remaining)
+        val n = stream.read(buf)
+        if (n < 0) break
+        if (n == 0) break
+        out.write(buf, 0, n)
+        total += n
+      }
+
+      if (out.size() == 0) {
         return@AsyncFunction ""
       }
-      Base64.encodeToString(buf, 0, n, Base64.NO_WRAP)
+      Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP)
     }
 
     AsyncFunction("closeInput") { streamId: String ->

@@ -39,7 +39,7 @@ import {
 import { streamFileChunks } from '../src/lib/fileStream';
 import type { ReceivedFileWriter } from '../src/lib/fileStream';
 import { getDisplayName } from '../src/lib/deviceName';
-import { logError, logInfo, logWarn } from '../src/lib/logger';
+import { logError, logInfo, logWarn, describeUri, describeError, redactName } from '../src/lib/logger';
 
 type QueuedFile = {
   id: string;
@@ -132,7 +132,15 @@ export default function TransferScreen() {
         }));
         setQueue(normalized);
         queueRef.current = normalized;
-      } catch {
+        logInfo('transfer', `queue loaded from Send screen: ${normalized.length} file(s)`);
+        normalized.forEach((f, i) =>
+          logInfo(
+            'transfer',
+            `queued[${i}] ${redactName(f.name)} size=${f.size} mime=${f.type || '(none)'} ${describeUri(f.uri)}`
+          )
+        );
+      } catch (e) {
+        logError('transfer', `queue load failed: ${describeError(e)}`);
         setError('Could not load file list');
       }
     }
@@ -206,6 +214,10 @@ export default function TransferScreen() {
       const item = pending[i];
       updateFile(item.id, { status: 'sending', progress: 0 });
 
+      logInfo(
+        'transfer',
+        `file ${i + 1}/${pending.length} begin ${redactName(item.name)} size=${item.size} ${describeUri(item.uri)} channelOpen=${session.isChannelOpen()}`
+      );
       session.sendJson({
         type: 'file-start',
         fileId: item.id,
@@ -242,10 +254,15 @@ export default function TransferScreen() {
         );
 
         session.sendJson({ type: 'file-complete', fileId: item.id });
+        logInfo('transfer', `file ${i + 1}/${pending.length} sent ok (${item.size} bytes)`);
         updateFile(item.id, { status: 'completed', progress: 100 });
       } catch (e) {
         const msg = e instanceof Error ? e.message : 'Send failed';
         logError('transfer', `send failed for ${item.name}: ${msg}`);
+        logError(
+          'transfer',
+          `send failure detail: raw=${describeError(e)} sentBytes=${done}/${total} channelOpen=${session.isChannelOpen()} ${describeUri(item.uri)}`
+        );
         updateFile(item.id, { status: 'error', error: msg });
         session.sendJson({ type: 'transfer-error', message: msg });
         setPhase('failed');
@@ -323,7 +340,10 @@ export default function TransferScreen() {
         multiple: true,
         copyToCacheDirectory: false,
       });
-      if (result.canceled || !result.assets?.length) return;
+      if (result.canceled || !result.assets?.length) {
+        logInfo('transfer', 'picker cancelled / no assets (transfer screen)');
+        return;
+      }
 
       const files: QueuedFile[] = result.assets.map((a) => ({
         id: randomId(),
@@ -334,6 +354,13 @@ export default function TransferScreen() {
         status: 'pending',
         progress: 0,
       }));
+      logInfo('transfer', `picked on transfer screen: ${files.length} file(s)`);
+      files.forEach((f, i) =>
+        logInfo(
+          'transfer',
+          `picked[${i}] ${redactName(f.name)} size=${f.size}${f.size === 0 ? ' [NO SIZE]' : ''} mime=${f.type} ${describeUri(f.uri)}`
+        )
+      );
 
       const tooBig = files.find((f) => f.size > MAX_FILE_SIZE);
       if (tooBig) {

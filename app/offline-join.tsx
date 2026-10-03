@@ -1,7 +1,7 @@
 /**
  * Join Room: NFC / Nearby / QR.
  */
-import { useRef, useState, useCallback } from 'react';
+import { useEffect, useRef, useState, useCallback } from 'react';
 import {
   View,
   Text,
@@ -15,10 +15,14 @@ import { useRouter, useFocusEffect } from 'expo-router';
 import QRCode from 'react-native-qrcode-svg';
 import { WebRTCSession } from '../src/lib/webrtcSession';
 import { encodeRoomAnswer, decodeRoomPayload } from '../src/lib/offlineSignal';
-import { setOfflineSession } from '../src/lib/offlineSessionStore';
+import { setOfflineSession, clearOfflineSession } from '../src/lib/offlineSessionStore';
 import { PairingMethodPicker } from '../src/components/PairingMethodPicker';
-import { startNearbyGuest } from '../src/lib/nearbyPairing';
+import { startNearbyGuest, isNearbyCancelled } from '../src/lib/nearbyPairing';
+import { logInfo, logWarn, logError, describeError } from '../src/lib/logger';
 import { getDisplayName } from '../src/lib/deviceName';
+
+/** How long the guest waits for the host to tap Accept before giving up. */
+const HOST_ACCEPT_TIMEOUT_MS = 120_000;
 
 export default function OfflineJoinScreen() {
   const router = useRouter();
@@ -31,7 +35,142 @@ export default function OfflineJoinScreen() {
   const [roomCode, setRoomCode] = useState('');
   const [error, setError] = useState<string | null>(null);
   const sessionRef = useRef<WebRTCSession | null>(null);
+  /** Cancel (while searching) or stop (after offer found) for the nearby UDP socket. */
   const nearbyStopRef = useRef<(() => void) | null>(null);
+  /** Bumped on cancel/retry/unmount so late async results from an old attempt are ignored. */
+  const attemptRef = useRef(0);
+  const handedOffRef = useRef(false);
+  const acceptTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const clearAcceptTimer = useCallback(() => {
+    if (acceptTimerRef.current) clearTimeout(acceptTimerRef.current);
+    acceptTimerRef.current = null;
+  }, []);
+
+  /** Stop searching, close the peer connection and forget this attempt. */
+  const teardown = useCallback(() => {
+    attemptRef.current++;
+    clearAcceptTimer();
+    nearbyStopRef.current?.();
+    nearbyStopRef.current = null;
+    if (!handedOffRef.current) {
+      clearOfflineSession();
+      try {
+        sessionRef.current?.close();
+      } catch {
+        /* */
+      }
+    }
+    sessionRef.current = null;
+  }, [clearAcceptTimer]);
+
+  useEffect(() => {
+    return () => teardown();
+  }, [teardown]);
+
+  const backToMethods = useCallback(() => {
+    teardown();
+    setError(null);
+    setStatus('');
+    setAnswerPayload(null);
+    setPhase('choose-method');
+  }, [teardown]);
+
+  /** Creates the session for this attempt and wires open/failed (with stale-attempt guards). */
+  const makeSession = useCallback(
+    (attempt: number, peer: { name: string; code: string }) => {
+      const session = new WebRTCSession(undefined, { offline: true });
+      sessionRef.current = session;
+      session.setHandlers({
+        onOpen: () => {
+          if (attempt !== attemptRef.current) return;
+          clearAcceptTimer();
+          nearbyStopRef.current?.();
+          handedOffRef.current = true;
+          setOfflineSession(session, {
+            peerName: peer.name,
+            roomCode: peer.code,
+            isHost: false,
+          });
+          router.replace({ pathname: '/offline-session' as any, params: { role: 'join' } } as any);
+        },
+        onFailed: (reason) => {
+          if (attempt !== attemptRef.current) return;
+          clearAcceptTimer();
+          nearbyStopRef.current?.();
+          logWarn('offline-join', `session failed: ${reason}`);
+          setError(reason);
+          setPhase('failed');
+        },
+      });
+      return session;
+    },
+    [router, clearAcceptTimer]
+  );
+
+  const armAcceptTimeout = useCallback(
+    (attempt: number) => {
+      clearAcceptTimer();
+      acceptTimerRef.current = setTimeout(() => {
+        if (attempt !== attemptRef.current) return;
+        logWarn('offline-join', `host did not accept within ${HOST_ACCEPT_TIMEOUT_MS / 1000}s`);
+        nearbyStopRef.current?.();
+        try {
+          sessionRef.current?.close();
+        } catch {
+          /* */
+        }
+        setError('The host did not accept the request. Ask the host to try again, then retry.');
+        setPhase('failed');
+      }, HOST_ACCEPT_TIMEOUT_MS);
+    },
+    [clearAcceptTimer]
+  );
+
+  const applyOfferRaw = useCallback(
+    async (raw: string) => {
+      const decoded = decodeRoomPayload(raw);
+      if (!decoded || decoded.type !== 'offer') {
+        Alert.alert('Invalid QR code', 'Scan the host’s room QR code.');
+        setPhase('choose-method');
+        return;
+      }
+
+      const attempt = ++attemptRef.current;
+      setPhase('creating');
+      setError(null);
+      setHostName(decoded.name || 'Host');
+      setRoomCode(decoded.code);
+
+      try {
+        const displayName = await getDisplayName();
+        const session = makeSession(attempt, {
+          name: decoded.name || 'Host',
+          code: decoded.code,
+        });
+
+        const answer = await session.handleOfferForQr(decoded.sdp);
+        if (attempt !== attemptRef.current) {
+          session.close();
+          return;
+        }
+        const payload = encodeRoomAnswer({
+          code: decoded.code,
+          name: displayName,
+          sdp: answer,
+        });
+        setAnswerPayload(payload);
+        setPhase('show-answer');
+        armAcceptTimeout(attempt);
+      } catch (e) {
+        if (attempt !== attemptRef.current) return;
+        logError('offline-join', `qr join failed: ${describeError(e)}`);
+        setError(e instanceof Error ? e.message : 'Failed to join room');
+        setPhase('failed');
+      }
+    },
+    [makeSession, armAcceptTimeout]
+  );
 
   useFocusEffect(
     useCallback(() => {
@@ -40,67 +179,27 @@ export default function OfflineJoinScreen() {
         (globalThis as any).__localdropPendingOffer = undefined;
         void applyOfferRaw(pending);
       }
-      return () => {
-        nearbyStopRef.current?.();
-      };
-    }, [])
+    }, [applyOfferRaw])
   );
 
-  async function applyOfferRaw(raw: string) {
-    const decoded = decodeRoomPayload(raw);
-    if (!decoded || decoded.type !== 'offer') {
-      Alert.alert('Invalid QR code', 'Scan the host’s room QR code.');
-      setPhase('choose-method');
-      return;
-    }
-
-    setPhase('creating');
-    setError(null);
-    setHostName(decoded.name || 'Host');
-    setRoomCode(decoded.code);
-
-    try {
-      const displayName = await getDisplayName();
-      const session = new WebRTCSession();
-      sessionRef.current = session;
-
-      session.setHandlers({
-        onOpen: () => {
-          setOfflineSession(session, {
-            peerName: decoded.name || 'Host',
-            roomCode: decoded.code,
-            isHost: false,
-          });
-          router.replace({ pathname: '/offline-session' as any, params: { role: 'join' } } as any);
-        },
-        onFailed: (reason) => {
-          setError(reason);
-          setPhase('failed');
-        },
-      });
-
-      const answer = await session.handleOfferForQr(decoded.sdp);
-      const payload = encodeRoomAnswer({
-        code: decoded.code,
-        name: displayName,
-        sdp: answer,
-      });
-      setAnswerPayload(payload);
-      setPhase('show-answer');
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to join room');
-      setPhase('failed');
-    }
-  }
-
   async function startNearbyJoin() {
+    const attempt = ++attemptRef.current;
     setPhase('nearby');
     setError(null);
     setStatus('Looking for nearby room…');
 
     try {
       const displayName = await getDisplayName();
-      const guest = await startNearbyGuest({ onStatus: setStatus });
+      const guest = await startNearbyGuest({
+        onStatus: setStatus,
+        onReady: (cancel) => {
+          nearbyStopRef.current = cancel;
+        },
+      });
+      if (attempt !== attemptRef.current) {
+        guest.stop();
+        return;
+      }
       nearbyStopRef.current = guest.stop;
 
       setStatus('Room found — connecting…');
@@ -112,26 +211,17 @@ export default function OfflineJoinScreen() {
         throw new Error('Invalid offer from host');
       }
 
-      const session = new WebRTCSession();
-      sessionRef.current = session;
-
-      session.setHandlers({
-        onOpen: () => {
-          nearbyStopRef.current?.();
-          setOfflineSession(session, {
-            peerName: decoded.name || guest.hostName || 'Host',
-            roomCode: decoded.code,
-            isHost: false,
-          });
-          router.replace({ pathname: '/offline-session' as any, params: { role: 'join' } } as any);
-        },
-        onFailed: (reason) => {
-          setError(reason);
-          setPhase('failed');
-        },
+      const session = makeSession(attempt, {
+        name: decoded.name || guest.hostName || 'Host',
+        code: decoded.code,
       });
 
       const answer = await session.handleOfferForQr(decoded.sdp);
+      if (attempt !== attemptRef.current) {
+        session.close();
+        guest.stop();
+        return;
+      }
       const payload = encodeRoomAnswer({
         code: decoded.code,
         name: displayName,
@@ -141,8 +231,11 @@ export default function OfflineJoinScreen() {
       guest.sendAnswer(payload, displayName);
       setStatus('Answer sent — waiting for host to accept…');
       setPhase('waiting');
+      armAcceptTimeout(attempt);
     } catch (e) {
+      if (isNearbyCancelled(e) || attempt !== attemptRef.current) return;
       nearbyStopRef.current?.();
+      logError('offline-join', `nearby join failed: ${describeError(e)}`);
       setError(
         e instanceof Error
           ? e.message
@@ -171,13 +264,7 @@ export default function OfflineJoinScreen() {
         <View style={styles.center}>
           <ActivityIndicator color="#3b82f6" size="large" />
           <Text style={styles.status}>{status || 'Working…'}</Text>
-          <Pressable
-            style={{ marginTop: 24 }}
-            onPress={() => {
-              nearbyStopRef.current?.();
-              setPhase('choose-method');
-            }}
-          >
+          <Pressable style={{ marginTop: 24 }} onPress={backToMethods}>
             <Text style={{ color: '#3b82f6' }}>Cancel</Text>
           </Pressable>
         </View>
@@ -193,6 +280,9 @@ export default function OfflineJoinScreen() {
             {'\n'}Host should Accept the join request.
           </Text>
           <Text style={styles.status}>{status}</Text>
+          <Pressable style={{ marginTop: 24 }} onPress={backToMethods}>
+            <Text style={{ color: '#3b82f6' }}>Cancel</Text>
+          </Pressable>
         </View>
       )}
 
@@ -209,13 +299,16 @@ export default function OfflineJoinScreen() {
           </View>
           <ActivityIndicator color="#3b82f6" style={{ marginTop: 16 }} />
           <Text style={styles.status}>Waiting for host to accept…</Text>
+          <Pressable style={{ marginTop: 24 }} onPress={backToMethods}>
+            <Text style={{ color: '#3b82f6' }}>Cancel</Text>
+          </Pressable>
         </View>
       )}
 
       {error && (
         <View>
           <Text style={styles.error}>{error}</Text>
-          <Pressable style={{ marginTop: 16, alignItems: 'center' }} onPress={() => setPhase('choose-method')}>
+          <Pressable style={{ marginTop: 16, alignItems: 'center' }} onPress={backToMethods}>
             <Text style={{ color: '#3b82f6' }}>Try again</Text>
           </Pressable>
         </View>

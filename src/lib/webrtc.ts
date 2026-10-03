@@ -21,11 +21,22 @@ export const LOCAL_ICE_CONFIG = {
   iceCandidatePoolSize: 2,
 };
 
+/**
+ * Offline (same Wi‑Fi / hotspot) rooms: host candidates only. Public STUN servers are
+ * unreachable without internet, which made ICE gathering wait for its full timeout
+ * (≈8 s) on both devices before a QR/nearby payload could be produced.
+ */
+export const OFFLINE_ICE_CONFIG = {
+  iceServers: [] as { urls: string }[],
+  iceCandidatePoolSize: 0,
+};
+
 export function createPeerConnection(
   onIceCandidate: (candidate: any) => void,
-  onConnectionStateChange: (state: string) => void
+  onConnectionStateChange: (state: string) => void,
+  config: typeof LOCAL_ICE_CONFIG | typeof OFFLINE_ICE_CONFIG = LOCAL_ICE_CONFIG
 ): any {
-  const pc = new RTCPeerConnection(LOCAL_ICE_CONFIG);
+  const pc = new RTCPeerConnection(config);
 
   // @ts-expect-error RN event style
   pc.onicecandidate = (event: any) => {

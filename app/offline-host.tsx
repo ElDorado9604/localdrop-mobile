@@ -1,7 +1,7 @@
 /**
  * Create Room: NFC / Nearby / QR.
  */
-import { useRef, useState, useCallback } from 'react';
+import { useEffect, useRef, useState, useCallback } from 'react';
 import {
   View,
   Text,
@@ -21,7 +21,8 @@ import {
 } from '../src/lib/offlineSignal';
 import { setOfflineSession, clearOfflineSession } from '../src/lib/offlineSessionStore';
 import { PairingMethodPicker } from '../src/components/PairingMethodPicker';
-import { startNearbyHost } from '../src/lib/nearbyPairing';
+import { startNearbyHost, isNearbyCancelled } from '../src/lib/nearbyPairing';
+import { logInfo, logWarn, logError, describeError } from '../src/lib/logger';
 import { getDisplayName } from '../src/lib/deviceName';
 
 export default function OfflineHostScreen() {
@@ -45,9 +46,17 @@ export default function OfflineHostScreen() {
   const [myName, setMyName] = useState('Device');
   const sessionRef = useRef<WebRTCSession | null>(null);
   const codeRef = useRef('');
+  const nameRef = useRef('Device');
   const peerNameRef = useRef('peer');
   const startedRef = useRef(false);
+  /** Cancel (while searching) or stop (after answer) for the nearby UDP socket. */
   const nearbyStopRef = useRef<(() => void) | null>(null);
+  /** Offer payload kept so Reject can resume broadcasting the same room. */
+  const offerRawRef = useRef<string | null>(null);
+  /** Bumped on reset/cancel/unmount so late async results from an old attempt are ignored. */
+  const attemptRef = useRef(0);
+  /** True once the session was handed to /offline-session (do not close it on unmount). */
+  const handedOffRef = useRef(false);
 
   useFocusEffect(
     useCallback(() => {
@@ -82,30 +91,52 @@ export default function OfflineHostScreen() {
         if ((globalThis as any).__localdropOnAnswerScanned === onAnswerScanned) {
           (globalThis as any).__localdropOnAnswerScanned = undefined;
         }
-        nearbyStopRef.current?.();
       };
     }, [onAnswerScanned])
   );
 
-  async function startQrRoom() {
-    if (startedRef.current) return;
-    startedRef.current = true;
-    setPhase('creating');
+  /** Close everything this screen created and forget it (used by Try again / Cancel / unmount). */
+  const teardown = useCallback(() => {
+    attemptRef.current++;
+    nearbyStopRef.current?.();
+    nearbyStopRef.current = null;
+    if (!handedOffRef.current) {
+      clearOfflineSession();
+      try {
+        sessionRef.current?.close();
+      } catch {
+        /* */
+      }
+    }
+    sessionRef.current = null;
+    offerRawRef.current = null;
+    startedRef.current = false;
+  }, []);
+
+  // Unmount (hardware back, swipe) — stop broadcasting and release the socket/pc.
+  useEffect(() => {
+    return () => teardown();
+  }, [teardown]);
+
+  const resetRoom = useCallback(() => {
+    teardown();
+    setOfferPayload(null);
+    setPendingJoin(null);
+    setRoomCode('');
     setError(null);
+    setStatus('');
+    setPhase('choose-method');
+  }, [teardown]);
 
-    try {
-      const displayName = await getDisplayName();
-      setMyName(displayName);
-
-      const code = generateRoomCode();
-      codeRef.current = code;
-      setRoomCode(code);
-
-      const session = new WebRTCSession();
+  const makeSession = useCallback(
+    (attempt: number) => {
+      const session = new WebRTCSession(undefined, { offline: true });
       sessionRef.current = session;
-
       session.setHandlers({
         onOpen: () => {
+          if (attempt !== attemptRef.current) return;
+          nearbyStopRef.current?.();
+          handedOffRef.current = true;
           setOfflineSession(session, {
             peerName: peerNameRef.current,
             roomCode: codeRef.current,
@@ -114,12 +145,41 @@ export default function OfflineHostScreen() {
           router.replace({ pathname: '/offline-session' as any, params: { role: 'host' } } as any);
         },
         onFailed: (reason) => {
+          if (attempt !== attemptRef.current) return;
+          nearbyStopRef.current?.();
+          startedRef.current = false;
+          logWarn('offline-host', `session failed: ${reason}`);
           setError(reason);
           setPhase('failed');
         },
       });
+      return session;
+    },
+    [router]
+  );
 
+  async function startQrRoom() {
+    if (startedRef.current) return;
+    startedRef.current = true;
+    const attempt = ++attemptRef.current;
+    setPhase('creating');
+    setError(null);
+
+    try {
+      const displayName = await getDisplayName();
+      setMyName(displayName);
+      nameRef.current = displayName;
+
+      const code = generateRoomCode();
+      codeRef.current = code;
+      setRoomCode(code);
+
+      const session = makeSession(attempt);
       const local = await session.createOfferForQr();
+      if (attempt !== attemptRef.current) {
+        session.close();
+        return;
+      }
       const payload = encodeRoomOffer({
         code,
         name: displayName,
@@ -128,62 +188,38 @@ export default function OfflineHostScreen() {
       setOfferPayload(payload);
       setPhase('waiting');
     } catch (e) {
+      if (attempt !== attemptRef.current) return;
       startedRef.current = false;
+      logError('offline-host', `qr room failed: ${describeError(e)}`);
       setError(e instanceof Error ? e.message : 'Failed to create room');
       setPhase('failed');
     }
   }
 
-  async function startNearbyRoom() {
-    if (startedRef.current) return;
-    startedRef.current = true;
-    setPhase('creating');
-    setError(null);
-    setStatus('Creating room…');
+  /** Broadcast the stored offer and wait for a (valid) answer. Safe to call again after Reject. */
+  const beginNearbyBroadcast = useCallback(async (attempt: number) => {
+    const payload = offerRawRef.current;
+    if (!payload) return;
+    setPhase('nearby-wait');
+    setStatus('Waiting for nearby device…');
 
     try {
-      const displayName = await getDisplayName();
-      setMyName(displayName);
-
-      const code = generateRoomCode();
-      codeRef.current = code;
-      setRoomCode(code);
-
-      const session = new WebRTCSession();
-      sessionRef.current = session;
-
-      session.setHandlers({
-        onOpen: () => {
-          nearbyStopRef.current?.();
-          setOfflineSession(session, {
-            peerName: peerNameRef.current,
-            roomCode: codeRef.current,
-            isHost: true,
-          });
-          router.replace({ pathname: '/offline-session' as any, params: { role: 'host' } } as any);
-        },
-        onFailed: (reason) => {
-          setError(reason);
-          setPhase('failed');
-        },
-      });
-
-      const local = await session.createOfferForQr();
-      const payload = encodeRoomOffer({
-        code,
-        name: displayName,
-        sdp: local,
-      });
-
-      setPhase('nearby-wait');
-      setStatus('Waiting for nearby device…');
-
       const result = await startNearbyHost({
         offerRaw: payload,
-        name: displayName,
-        code,
+        name: nameRef.current,
+        code: codeRef.current,
         onStatus: setStatus,
+        onReady: (cancel) => {
+          nearbyStopRef.current = cancel;
+        },
+        validateAnswer: (raw) => {
+          const d = decodeRoomPayload(raw);
+          if (!d || d.type !== 'answer') return false;
+          // Legacy answers carry no code; otherwise it must match this room.
+          return !codeRef.current || !d.code || d.code === codeRef.current;
+        },
       });
+      if (attempt !== attemptRef.current) return;
       nearbyStopRef.current = result.stop;
 
       const decoded = decodeRoomPayload(result.answerRaw);
@@ -198,13 +234,54 @@ export default function OfflineHostScreen() {
       });
       setPhase('review-join');
     } catch (e) {
-      startedRef.current = false;
+      if (isNearbyCancelled(e) || attempt !== attemptRef.current) return;
       nearbyStopRef.current?.();
+      startedRef.current = false;
+      logError('offline-host', `nearby failed: ${describeError(e)}`);
       setError(
         e instanceof Error
           ? e.message
           : 'Nearby pairing failed. Stay on the same Wi‑Fi or hotspot.'
       );
+      setPhase('failed');
+    }
+  }, []);
+
+  async function startNearbyRoom() {
+    if (startedRef.current) return;
+    startedRef.current = true;
+    const attempt = ++attemptRef.current;
+    setPhase('creating');
+    setError(null);
+    setStatus('Creating room…');
+
+    try {
+      const displayName = await getDisplayName();
+      setMyName(displayName);
+      nameRef.current = displayName;
+
+      const code = generateRoomCode();
+      codeRef.current = code;
+      setRoomCode(code);
+
+      const session = makeSession(attempt);
+      const local = await session.createOfferForQr();
+      if (attempt !== attemptRef.current) {
+        session.close();
+        return;
+      }
+      offerRawRef.current = encodeRoomOffer({
+        code,
+        name: displayName,
+        sdp: local,
+      });
+
+      await beginNearbyBroadcast(attempt);
+    } catch (e) {
+      if (attempt !== attemptRef.current) return;
+      startedRef.current = false;
+      logError('offline-host', `nearby room failed: ${describeError(e)}`);
+      setError(e instanceof Error ? e.message : 'Failed to create room');
       setPhase('failed');
     }
   }
@@ -213,6 +290,7 @@ export default function OfflineHostScreen() {
     if (!pendingJoin || !sessionRef.current) return;
     setPhase('connecting');
     peerNameRef.current = pendingJoin.name;
+    logInfo('offline-host', `accepted join from ${pendingJoin.name}`);
     try {
       setOfflineSession(sessionRef.current, {
         peerName: pendingJoin.name,
@@ -221,6 +299,7 @@ export default function OfflineHostScreen() {
       });
       await sessionRef.current.handleAnswer(pendingJoin.sdp);
     } catch (e) {
+      logError('offline-host', `accept failed: ${describeError(e)}`);
       setError(e instanceof Error ? e.message : 'Failed to connect');
       setPhase('failed');
     }
@@ -228,8 +307,16 @@ export default function OfflineHostScreen() {
 
   function rejectJoin() {
     setPendingJoin(null);
-    setPhase(offerPayload ? 'waiting' : 'nearby-wait');
-    Alert.alert('Rejected', 'Waiting for another device.');
+    logInfo('offline-host', 'join rejected');
+    if (offerPayload) {
+      // QR flow: keep showing the QR.
+      setPhase('waiting');
+      Alert.alert('Rejected', 'Waiting for another device.');
+      return;
+    }
+    // Nearby flow: the UDP search had already stopped — resume broadcasting the same room.
+    Alert.alert('Rejected', 'Looking for another device.');
+    void beginNearbyBroadcast(attemptRef.current);
   }
 
   function cancelRoom() {
@@ -239,10 +326,7 @@ export default function OfflineHostScreen() {
         text: 'Cancel room',
         style: 'destructive',
         onPress: () => {
-          clearOfflineSession();
-          nearbyStopRef.current?.();
-          sessionRef.current?.close();
-          startedRef.current = false;
+          teardown();
           router.replace('/offline' as any);
         },
       },
@@ -340,6 +424,23 @@ export default function OfflineHostScreen() {
       )}
 
       {error && <Text style={styles.error}>{error}</Text>}
+
+      {phase === 'failed' && (
+        <View style={styles.center}>
+          <Pressable style={[styles.primaryBtn, { marginTop: 20 }]} onPress={resetRoom}>
+            <Text style={styles.primaryBtnText}>Try again</Text>
+          </Pressable>
+          <Pressable
+            style={styles.cancelBtn}
+            onPress={() => {
+              teardown();
+              router.replace('/offline' as any);
+            }}
+          >
+            <Text style={styles.cancelText}>Back</Text>
+          </Pressable>
+        </View>
+      )}
     </ScrollView>
   );
 }

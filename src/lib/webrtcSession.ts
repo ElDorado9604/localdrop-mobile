@@ -5,6 +5,8 @@
 
 import {
   createPeerConnection,
+  OFFLINE_ICE_CONFIG,
+  LOCAL_ICE_CONFIG,
   createDataChannel,
   RTCSessionDescription,
   RTCIceCandidate,
@@ -26,13 +28,16 @@ export class WebRTCSession {
   private completed = false;
   private closedNotified = false;
   private onSignal: SignalHandler;
+  private offline: boolean;
   private onOpen: (() => void) | null = null;
   private onMessage: ((data: ArrayBuffer | string) => void) | null = null;
   private onClose: (() => void) | null = null;
   private onFailed: ((reason: string) => void) | null = null;
 
-  constructor(onSignal: SignalHandler = () => {}) {
+  /** `offline: true` → no STUN servers (LAN-only rooms: QR / Connect nearby). */
+  constructor(onSignal: SignalHandler = () => {}, opts?: { offline?: boolean }) {
     this.onSignal = onSignal;
+    this.offline = !!opts?.offline;
   }
 
   setHandlers(h: {
@@ -91,7 +96,7 @@ export class WebRTCSession {
   private ensurePc(asInitiator: boolean) {
     if (this.pc) return this.pc;
 
-    logInfo('webrtc', `pc create initiator=${asInitiator}`);
+    logInfo('webrtc', `pc create initiator=${asInitiator} offline=${this.offline}`);
     this.pc = createPeerConnection(
       (candidate) => {
         this.onSignal('ice-candidate', candidate.toJSON ? candidate.toJSON() : candidate);
@@ -107,7 +112,8 @@ export class WebRTCSession {
         } else if (state === 'connected' || state === 'completed') {
           logInfo('webrtc', `ice ${state}`);
         }
-      }
+      },
+      this.offline ? OFFLINE_ICE_CONFIG : LOCAL_ICE_CONFIG
     );
 
     try {

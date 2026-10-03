@@ -21,6 +21,7 @@ import {
   closeSafInputStream,
 } from 'saf-stream';
 import { getCacheCopySmallFiles, CACHE_COPY_MAX_BYTES } from './settings';
+import { logInfo, logWarn, logError, logVerbose, describeUri, describeError } from './logger';
 
 const CACHE_STAGE_MAX = 100 * 1024 * 1024; // 100 MB receive-only fallback
 
@@ -70,11 +71,12 @@ async function streamFromFileUri(
         }
       }
     }
-  } catch {
-    /* fall through */
+  } catch (e) {
+    logVerbose('filestream', `FileHandle open/read failed, falling through: ${describeError(e)}`);
   }
 
   if (uri.startsWith('content://')) {
+    logError('filestream', `content:// not readable via FileHandle ${describeUri(uri)}`);
     throw new Error(
       'Cannot read this file from storage. Rebuild the app with the latest native module, then try again.'
     );
@@ -109,29 +111,44 @@ async function tryCacheCopyAndStream(
   signal: { cancelled: boolean } | undefined,
   readChunk: number
 ): Promise<boolean> {
-  if (fileSize <= 0 || fileSize > CACHE_COPY_MAX_BYTES) return false;
+  if (fileSize <= 0 || fileSize > CACHE_COPY_MAX_BYTES) {
+    logWarn(
+      'filestream',
+      `cache-copy skipped: size=${fileSize} out of range (1..${CACHE_COPY_MAX_BYTES}) ${fileSize <= 0 ? '[picker reported no size]' : ''}`
+    );
+    return false;
+  }
   const allowed = await getCacheCopySmallFiles();
-  if (!allowed) return false;
+  if (!allowed) {
+    logWarn('filestream', 'cache-copy skipped: setting is off');
+    return false;
+  }
 
   const cacheDir =
     FileSystemLegacy.cacheDirectory || FileSystemLegacy.documentDirectory || '';
-  if (!cacheDir) return false;
+  if (!cacheDir) {
+    logWarn('filestream', 'cache-copy skipped: no cache/document directory');
+    return false;
+  }
+  logInfo('filestream', `cache-copy attempt size=${fileSize} ${describeUri(uri)}`);
 
   const dest = `${cacheDir}localdrop_send_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
   try {
     await FileSystemLegacy.copyAsync({ from: uri, to: dest });
-  } catch {
-    try {
-      // Some content:// URIs need StorageAccessFramework-style access via native only
-      return false;
-    } catch {
-      return false;
-    }
+  } catch (copyErr) {
+    // Some content:// URIs need StorageAccessFramework-style access via native only
+    logError('filestream', `cache-copy copyAsync failed: ${describeError(copyErr)}`);
+    return false;
   }
+  logInfo('filestream', 'cache-copy copy ok; streaming from cache');
 
   try {
     await streamFromFileUri(dest, fileSize, onChunk, signal, readChunk);
+    logInfo('filestream', 'cache-copy stream complete');
     return true;
+  } catch (streamErr) {
+    logError('filestream', `cache-copy stream failed: ${describeError(streamErr)}`);
+    throw streamErr;
   } finally {
     try {
       await FileSystemLegacy.deleteAsync(dest, { idempotent: true });
@@ -156,6 +173,11 @@ export async function streamFileChunks(
   chunkSize: number = OFFLINE_CHUNK_SIZE
 ): Promise<void> {
   const readChunk = Math.max(16 * 1024, chunkSize);
+  const t0 = Date.now();
+  logInfo(
+    'filestream',
+    `read start platform=${Platform.OS} size=${fileSize} chunk=${readChunk} safAvailable=${isSafStreamAvailable()} ${describeUri(uri)}`
+  );
 
   // ——— Native SAF / ContentResolver input (Android content://) ———
   if (
@@ -166,6 +188,7 @@ export async function streamFileChunks(
     let streamId: string | null = null;
     try {
       streamId = await openSafInputStream(uri);
+      logInfo('filestream', `native openInput ok (+${Date.now() - t0}ms)`);
       let offset = 0;
       let index = 0;
       while (offset < fileSize) {
@@ -175,9 +198,19 @@ export async function streamFileChunks(
         if (!b64) break;
         const buf = base64ToArrayBuffer(b64);
         if (buf.byteLength === 0) break;
+        if (index === 0) {
+          logInfo('filestream', `first chunk read bytes=${buf.byteLength} (+${Date.now() - t0}ms)`);
+        }
         await onChunk(buf, offset, index);
         offset += buf.byteLength;
         index++;
+      }
+      logInfo(
+        'filestream',
+        `read done bytes=${offset}/${fileSize} chunks=${index} in ${Date.now() - t0}ms`
+      );
+      if (offset !== fileSize) {
+        logWarn('filestream', `byte count mismatch read=${offset} expected=${fileSize}`);
       }
       if (offset === 0 && fileSize > 0) {
         throw new Error('Could not read file (empty stream). Try picking the file again.');
@@ -187,6 +220,10 @@ export async function streamFileChunks(
       const msg = e instanceof Error ? e.message : String(e);
       const isPerm =
         /Permission|denied|SecurityException|obtain access|OPEN_DOCUMENT/i.test(msg);
+      logError(
+        'filestream',
+        `native read failed after ${Date.now() - t0}ms streamOpen=${streamId != null} isPerm=${isPerm} raw=${describeError(e)}`
+      );
 
       if (isPerm) {
         try {
@@ -204,6 +241,7 @@ export async function streamFileChunks(
           signal,
           readChunk
         );
+        logInfo('filestream', `cache-copy fallback result usedCache=${usedCache}`);
         if (usedCache) return;
 
         if (fileSize > CACHE_COPY_MAX_BYTES) {
@@ -232,7 +270,9 @@ export async function streamFileChunks(
     }
   }
 
+  logInfo('filestream', 'using non-SAF path (file:// or native module unavailable)');
   await streamFromFileUri(uri, fileSize, onChunk, signal, readChunk);
+  logInfo('filestream', `read done (non-SAF) in ${Date.now() - t0}ms`);
 }
 
 export type ReceivedFileWriter = {

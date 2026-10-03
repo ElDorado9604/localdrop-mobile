@@ -40,7 +40,7 @@ import { streamFileChunks } from '../src/lib/fileStream';
 import type { ReceivedFileWriter } from '../src/lib/fileStream';
 import { getDisplayName } from '../src/lib/deviceName';
 import { setTransferKeepAwake } from '../src/lib/keepTransferAwake';
-import { logError, logInfo, logWarn } from '../src/lib/logger';
+import { logError, logInfo, logWarn, describeUri, describeError, redactName } from '../src/lib/logger';
 
 type QueuedFile = {
   id: string;
@@ -174,6 +174,10 @@ export default function OfflineSessionScreen() {
       const item = pending[i];
       updateFile(item.id, { status: 'sending', progress: 0, error: undefined });
 
+      logInfo(
+        'offline-transfer',
+        `file ${i + 1}/${pending.length} begin ${redactName(item.name)} size=${item.size} ${describeUri(item.uri)}`
+      );
       const okStart = session.sendJson({
         type: 'file-start',
         fileId: item.id,
@@ -227,6 +231,10 @@ export default function OfflineSessionScreen() {
       } catch (e) {
         const msg = e instanceof Error ? e.message : 'File transfer failed';
         logError('offline-transfer', `send failed for ${item.name}: ${msg}`);
+        logError(
+          'offline-transfer',
+          `send failure detail: raw=${describeError(e)} ${describeUri(item.uri)}`
+        );
         updateFile(item.id, { status: 'error', error: msg });
         session.sendJson({ type: 'transfer-error', message: msg });
         setPhase('failed');
@@ -527,6 +535,15 @@ export default function OfflineSessionScreen() {
     [updateFile, runSend, allFilesOk, tryMarkCompleted, bytesTotal]
   );
 
+  // Leaving this screen any way other than "Leave Room" (hardware back, swipe) must still
+  // close the room, otherwise the peer keeps a half-open connection to a screen that is gone.
+  useEffect(() => {
+    return () => {
+      logInfo('offline-transfer', 'session screen unmounted — closing room');
+      clearOfflineSession();
+    };
+  }, []);
+
   useEffect(() => {
     const session = getOfflineSession();
     if (!session || !session.isChannelOpen()) {
@@ -584,6 +601,14 @@ export default function OfflineSessionScreen() {
         status: 'pending',
         progress: 0,
       }));
+
+      logInfo('offline-transfer', `picked: ${files.length} file(s)`);
+      files.forEach((f, i) =>
+        logInfo(
+          'offline-transfer',
+          `picked[${i}] ${redactName(f.name)} size=${f.size}${f.size === 0 ? ' [NO SIZE]' : ''} mime=${f.type} ${describeUri(f.uri)}`
+        )
+      );
 
       const tooBig = files.find((f) => f.size > MAX_FILE_SIZE);
       if (tooBig) {

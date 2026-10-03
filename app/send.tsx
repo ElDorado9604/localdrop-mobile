@@ -15,6 +15,7 @@ import { createRoom, cancelRoom, getSocket } from '../src/lib/socket';
 import { randomId } from '../src/lib/transferProtocol';
 import { buildJoinUrl } from '../src/lib/config';
 import { getDisplayName } from '../src/lib/deviceName';
+import { logInfo, describeUri, redactName } from '../src/lib/logger';
 
 type FileInfo = {
   id: string;
@@ -38,6 +39,7 @@ export default function SendScreen() {
   const statusRef = useRef(status);
   statusRef.current = status;
   const activeRoomRef = useRef(false);
+  const pickedAtRef = useRef<number>(0);
 
   useEffect(() => {
     if (isOffline) return;
@@ -86,7 +88,10 @@ export default function SendScreen() {
         multiple: true,
         copyToCacheDirectory: false,
       });
-      if (result.canceled) return;
+      if (result.canceled) {
+        logInfo('send', 'picker cancelled (send screen)');
+        return;
+      }
       const picked: FileInfo[] = result.assets.map((a) => ({
         id: randomId(),
         name: a.name,
@@ -94,6 +99,14 @@ export default function SendScreen() {
         uri: a.uri,
         type: a.mimeType,
       }));
+      pickedAtRef.current = Date.now();
+      logInfo('send', `picked on send screen: ${picked.length} file(s)`);
+      picked.forEach((f, i) =>
+        logInfo(
+          'send',
+          `picked[${i}] ${redactName(f.name)} size=${f.size}${f.size === 0 ? ' [NO SIZE]' : ''} mime=${f.type || '(none)'} ${describeUri(f.uri)}`
+        )
+      );
       setFiles((prev) => [...prev, ...picked]);
     } catch {
       Alert.alert('Error', 'Could not pick files');
@@ -142,6 +155,10 @@ export default function SendScreen() {
 
   function goToTransfer() {
     activeRoomRef.current = false;
+    logInfo(
+      'send',
+      `navigating to transfer with ${files.length} file(s); ms since last pick=${pickedAtRef.current ? Date.now() - pickedAtRef.current : 'n/a'}`
+    );
     router.push({
       pathname: '/transfer' as any,
       params: {

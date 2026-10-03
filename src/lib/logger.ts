@@ -177,3 +177,27 @@ export function redactName(name?: string | null): string {
   if (n.length <= 24) return n;
   return n.slice(0, 12) + '…' + n.slice(-8);
 }
+
+/** Privacy-safe description of a file URI: scheme, provider authority, kind. No file names/paths. */
+export function describeUri(uri?: string | null): string {
+  if (!uri) return 'uri=(none)';
+  const m = /^([a-z][a-z0-9+.-]*):\/\/([^/?#]*)([^?#]*)/i.exec(uri);
+  if (!m) return 'uri=(unparsed)';
+  const [, scheme, authority, path] = m;
+  const segs = path.split('/').filter(Boolean);
+  let kind = '';
+  if (segs.includes('tree')) kind = ' kind=tree';
+  else if (segs.includes('document')) kind = ' kind=document';
+  const id = segs[segs.length - 1] || '';
+  const idPrefix = /^([a-z]+):/i.exec(decodeURIComponent(id))?.[1];
+  return `scheme=${scheme} authority=${authority || '(none)'}${kind}${idPrefix ? ` idPrefix=${idPrefix}` : ''}`;
+}
+
+/** Name + message + native code for an unknown thrown value. */
+export function describeError(e: unknown): string {
+  if (e instanceof Error) {
+    const code = (e as { code?: unknown }).code;
+    return `${e.name}: ${e.message}${code != null ? ` (code=${String(code)})` : ''}`;
+  }
+  return String(e);
+}

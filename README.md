@@ -15,9 +15,10 @@ Related web + backend repo: [localdrop](https://github.com/ElDorado9604/localdro
 | Online / Offline switcher | Done                         |
 | File picker (Send)        | Done                         |
 | Create / Join pairing     | Done (Socket.IO)             |
-| Transfer progress UI      | Done (skeleton)              |
-| WebRTC data channel       | Code ready – needs dev build |
-| Offline local discovery   | Pending                      |
+| Transfer progress UI      | Done                         |
+| WebRTC data channel       | Done – needs dev build       |
+| Offline pairing (QR / Connect nearby over UDP) | Done    |
+| Diagnostics log (Settings)| Done                         |
 
 ---
 

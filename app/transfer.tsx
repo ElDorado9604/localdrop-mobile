@@ -40,6 +40,7 @@ import { streamFileChunks } from '../src/lib/fileStream';
 import type { ReceivedFileWriter } from '../src/lib/fileStream';
 import { getDisplayName } from '../src/lib/deviceName';
 import { logError, logInfo, logWarn, describeUri, describeError, redactName } from '../src/lib/logger';
+import { getPendingFiles, clearPendingFiles } from '../src/lib/pendingFilesStore';
 
 type QueuedFile = {
   id: string;
@@ -122,9 +123,20 @@ export default function TransferScreen() {
   }, [initialRole, logTransferStart]);
 
   useEffect(() => {
-    if (initialRole === 'sender' && params.filesJson) {
+    return () => clearPendingFiles();
+  }, []);
+
+  useEffect(() => {
+    if (initialRole === 'sender') {
       try {
-        const files = JSON.parse(params.filesJson as string) as QueuedFile[];
+        // Preferred: in-memory hand-off (URIs intact). Fallback: legacy filesJson param.
+        const staged = getPendingFiles();
+        const files: QueuedFile[] | null = staged
+          ? (staged as unknown as QueuedFile[])
+          : params.filesJson
+            ? (JSON.parse(params.filesJson as string) as QueuedFile[])
+            : null;
+        if (!files) return;
         const normalized = files.map((f) => ({
           ...f,
           status: 'pending' as const,

@@ -55,6 +55,15 @@ type QueuedFile = {
   displayPath?: string;
 };
 
+/** Receiver reports written bytes to the sender about every this many bytes. */
+const ACK_EVERY_BYTES = 1024 * 1024;
+/** Sender never runs further than this ahead of the receiver's last write-progress. */
+const SEND_WINDOW_BYTES = 8 * 1024 * 1024;
+/** Sender gives up if the receiver reports no progress for this long. */
+const ACK_STALL_MS = 30_000;
+/** How long the sender waits for the final transfer-ack before assuming success. */
+const FINAL_ACK_WAIT_MS = 30_000;
+
 export default function OfflineSessionScreen() {
   const router = useRouter();
   const peerName = getOfflinePeerName();
@@ -93,6 +102,16 @@ export default function OfflineSessionScreen() {
   /** Peer sent transfer-complete before our last file-complete finished. */
   const peerCompleteRef = useRef(false);
   const awaitingTransferAckRef = useRef(false);
+  /** Incoming messages are processed strictly in arrival order (see enqueueIncoming). */
+  const rxChainRef = useRef<Promise<void>>(Promise.resolve());
+  /** File currently being received (set by file-start, cleared on complete/abort). */
+  const rxFileIdRef = useRef<string | null>(null);
+  const lastAckSentRef = useRef(0);
+  /** Sender side: bytes of the current outbound file the peer reports as written. */
+  const ackedBytesRef = useRef(0);
+  const ackFileIdRef = useRef<string | null>(null);
+  const peerAcksRef = useRef(false);
+  const ackTickRef = useRef(0);
   const transferAckTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const logTransferStart = useCallback(async (role: 'sender' | 'receiver') => {
@@ -199,12 +218,27 @@ export default function OfflineSessionScreen() {
         const totalChunks = Math.ceil(item.size / OFFLINE_CHUNK_SIZE) || 1;
         let sentChunks = 0;
         let sentBytes = 0;
+        ackFileIdRef.current = item.id;
+        ackedBytesRef.current = 0;
+        ackTickRef.current = Date.now();
 
         await streamFileChunks(
           item.uri!,
           item.size,
           async (chunk) => {
             if (cancelledRef.current) throw new Error('Transfer cancelled');
+            // Flow control: don't outrun a slow receiver (only once it has shown it sends acks).
+            while (
+              peerAcksRef.current &&
+              sentBytes - ackedBytesRef.current >= SEND_WINDOW_BYTES
+            ) {
+              if (cancelledRef.current) throw new Error('Transfer cancelled');
+              if (!session.isChannelOpen()) throw new Error('Channel closed');
+              if (Date.now() - ackTickRef.current > ACK_STALL_MS) {
+                throw new Error('The other device stopped responding while saving the file.');
+              }
+              await new Promise((r) => setTimeout(r, 40));
+            }
             await session.sendBinary(chunk);
             sentChunks++;
             sentBytes += chunk.byteLength;
@@ -226,6 +260,7 @@ export default function OfflineSessionScreen() {
         if (cancelledRef.current) break;
 
         session.sendJson({ type: 'file-complete', fileId: item.id });
+        ackFileIdRef.current = null;
         updateFile(item.id, { status: 'completed', progress: 100 });
         completedIds.push(item.id);
       } catch (e) {
@@ -259,7 +294,7 @@ export default function OfflineSessionScreen() {
           setPhase('completed');
           setBytesDone(total);
         }
-      }, 5000);
+      }, FINAL_ACK_WAIT_MS);
     } else {
       setPhase('failed');
       setError('Transfer did not complete successfully');
@@ -271,18 +306,22 @@ export default function OfflineSessionScreen() {
       const session = getOfflineSession();
 
       if (typeof data !== 'string') {
-        let activeId: string | null = null;
-        for (const [id, entry] of writersRef.current) {
-          if (entry.receivedBytes < entry.meta.size) {
-            activeId = id;
-            break;
-          }
-        }
+        const activeId = rxFileIdRef.current;
         if (!activeId) return;
-        const entry = writersRef.current.get(activeId)!;
+        const entry = writersRef.current.get(activeId);
+        if (!entry) return;
         try {
           await entry.writer.writeChunk(data);
           entry.receivedBytes += data.byteLength;
+          // Tell the sender how far we really got so it can pace itself (≈ every 1 MB).
+          if (entry.receivedBytes - lastAckSentRef.current >= ACK_EVERY_BYTES) {
+            lastAckSentRef.current = entry.receivedBytes;
+            session?.sendJson({
+              type: 'write-progress',
+              fileId: activeId,
+              bytes: entry.receivedBytes,
+            });
+          }
           const progress = Math.min(
             99,
             Math.round((entry.receivedBytes / Math.max(1, entry.meta.size)) * 100)
@@ -381,6 +420,12 @@ export default function OfflineSessionScreen() {
             receivedBytes: 0,
             totalChunks,
           });
+          rxFileIdRef.current = msg.fileId;
+          lastAckSentRef.current = 0;
+          logInfo(
+            'offline-transfer',
+            `rx file-start ${redactName(msg.name)} size=${msg.size}`
+          );
         } catch (e) {
           const errMsg = e instanceof Error ? e.message : 'Could not create writer';
           logError('offline-transfer', `writer creation failed for ${msg.fileId}: ${errMsg}`);
@@ -418,24 +463,20 @@ export default function OfflineSessionScreen() {
         if (!entry) return;
 
         const target = entry.meta.size;
-        const deadline = Date.now() + 8000;
-        while (Date.now() < deadline) {
-          const written = Math.max(
-            entry.receivedBytes,
-            entry.writer.getWrittenBytes?.() ?? 0
-          );
-          entry.receivedBytes = written;
-          if (written >= target) break;
-          if (target > 0 && written / target >= 0.999) break;
-          await new Promise((r) => setTimeout(r, 40));
-        }
+        // Messages are processed in order, so every earlier chunk write has already finished
+        // here. No polling/deadline: whatever is written now is final.
+        logInfo(
+          'offline-transfer',
+          `rx file-complete received=${entry.receivedBytes}/${target} writer=${entry.writer.getWrittenBytes?.() ?? 'n/a'}`
+        );
         const finalBytes = Math.max(
           entry.receivedBytes,
           entry.writer.getWrittenBytes?.() ?? 0
         );
         entry.receivedBytes = finalBytes;
 
-        if (finalBytes < target * 0.995) {
+        if (rxFileIdRef.current === msg.fileId) rxFileIdRef.current = null;
+        if (finalBytes < target) {
           const errMsg = `Incomplete file: got ${formatBytes(finalBytes)} of ${formatBytes(target)}`;
           logError('offline-transfer', `incomplete file ${msg.fileId}: ${errMsg}`);
           updateFile(msg.fileId, { status: 'error', error: errMsg });
@@ -483,6 +524,14 @@ export default function OfflineSessionScreen() {
           setPhase('failed');
           setError(errMsg);
         }
+      } else if (msg.type === 'write-progress') {
+        if (msg.fileId === ackFileIdRef.current) {
+          peerAcksRef.current = true;
+          if (msg.bytes > ackedBytesRef.current) {
+            ackedBytesRef.current = msg.bytes;
+            ackTickRef.current = Date.now();
+          }
+        }
       } else if (msg.type === 'transfer-complete') {
         peerCompleteRef.current = true;
         if (
@@ -522,8 +571,19 @@ export default function OfflineSessionScreen() {
         setError('Transfer cancelled');
       } else if (msg.type === 'transfer-error') {
         const errMsg = msg.message || 'Transfer error';
-        logError('offline-transfer', errMsg);
+        logError('offline-transfer', `peer reported error: ${errMsg}`);
         cancelledRef.current = true;
+        awaitingTransferAckRef.current = false;
+        if (transferAckTimerRef.current) {
+          clearTimeout(transferAckTimerRef.current);
+          transferAckTimerRef.current = null;
+        }
+        // The peer could not save what we sent — don't leave files showing "completed".
+        for (const f of queueRef.current) {
+          if (f.status === 'completed' || f.status === 'sending') {
+            updateFile(f.id, { status: 'error', error: errMsg });
+          }
+        }
         for (const [, entry] of writersRef.current) {
           entry.writer.abort().catch(() => {});
         }
@@ -533,6 +593,27 @@ export default function OfflineSessionScreen() {
       }
     },
     [updateFile, runSend, allFilesOk, tryMarkCompleted, bytesTotal]
+  );
+
+  /**
+   * Process incoming messages one at a time, in arrival order. Chunk writes used to run
+   * concurrently, so a slow receiver (large file, slow storage) could still be writing when
+   * `file-complete` arrived — it then reported "Incomplete file" — and chunks could even be
+   * attributed to the wrong file. Cancel/error messages bypass the queue so they act at once.
+   */
+  const enqueueIncoming = useCallback(
+    (data: ArrayBuffer | string) => {
+      if (typeof data === 'string' && /"type"\s*:\s*"(transfer-cancelled|transfer-error)"/.test(data)) {
+        void handleProtocol(data);
+        return;
+      }
+      rxChainRef.current = rxChainRef.current
+        .then(() => handleProtocol(data))
+        .catch((e) => {
+          logError('offline-transfer', `incoming handler crashed: ${describeError(e)}`);
+        });
+    },
+    [handleProtocol]
   );
 
   // Leaving this screen any way other than "Leave Room" (hardware back, swipe) must still
@@ -554,7 +635,7 @@ export default function OfflineSessionScreen() {
 
     session.prepareForMore();
     session.setHandlers({
-      onMessage: (data) => void handleProtocol(data),
+      onMessage: (data) => enqueueIncoming(data),
       onClose: () => {
         cancelledRef.current = true;
         for (const [, entry] of writersRef.current) {
@@ -574,7 +655,7 @@ export default function OfflineSessionScreen() {
         setPhase('failed');
       },
     });
-  }, [handleProtocol]);
+  }, [enqueueIncoming]);
 
   async function pickAndOffer() {
     const session = getOfflineSession();

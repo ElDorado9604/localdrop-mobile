@@ -7,11 +7,16 @@
 import dgram from 'react-native-udp';
 import { logError, logInfo, logWarn } from './logger';
 import { decodeRoomPayload } from './offlineSignal';
+import { extractPrivateIPv4, broadcastFor, gatewayGuess, COMMON_GATEWAYS } from './netUtil';
+import { getLocalPrivateIPv4s } from './localAddresses';
 
 const PORT = 47831;
 const MAGIC = 'LDN1';
 const CHUNK = 700;
 type NearbySocket = ReturnType<typeof dgram.createSocket>;
+
+/** Guest → network: "is anyone hosting a room?" Host answers with unicast offer chunks. */
+type ProbeMsg = { m: typeof MAGIC; kind: 'probe'; id: string; name?: string };
 
 export type ChunkMsg = {
   m: typeof MAGIC;
@@ -121,27 +126,13 @@ function friendlySocketError(e: unknown): Error {
  * interface. Pure function (unit-tested).
  */
 export function deriveBroadcastAddresses(offerRaw: string): string[] {
-  const out: string[] = [];
   try {
     const decoded = decodeRoomPayload(offerRaw);
     const sdpText: string = decoded?.sdp?.sdp ?? '';
-    const re = /^a=candidate:\S+\s+\d+\s+udp\s+\d+\s+(\d{1,3}(?:\.\d{1,3}){3})\s+\d+\s+typ\s+host/gim;
-    let m: RegExpExecArray | null;
-    while ((m = re.exec(sdpText))) {
-      const o = m[1].split('.').map(Number);
-      if (o.some((n) => !(n >= 0 && n <= 255))) continue;
-      const isPrivate =
-        o[0] === 10 ||
-        (o[0] === 172 && o[1] >= 16 && o[1] <= 31) ||
-        (o[0] === 192 && o[1] === 168);
-      if (!isPrivate) continue;
-      const b = `${o[0]}.${o[1]}.${o[2]}.255`;
-      if (!out.includes(b)) out.push(b);
-    }
+    return extractPrivateIPv4(sdpText).map(broadcastFor).slice(0, 2);
   } catch {
-    /* ignore — fall back to default targets */
+    return [];
   }
-  return out.slice(0, 2);
 }
 
 export type NearbyHostResult = {
@@ -203,6 +194,9 @@ export function startNearbyHost(opts: {
     };
     opts.onReady?.(cancel);
 
+    /** Guests that probed us: reply with the offer by unicast (works when broadcast doesn't). */
+    const guestAddrs = new Set<string>();
+
     const sendTo = (buf: string, addr: string) => {
       try {
         socket?.send(buf, 0, buf.length, PORT, addr);
@@ -229,6 +223,7 @@ export function startNearbyHost(opts: {
             const buf = JSON.stringify(c);
             sendTo(buf, '255.255.255.255');
             for (const addr of derived) sendTo(buf, addr);
+            for (const addr of guestAddrs) sendTo(buf, addr);
             if (tick % 3 === 0 && !derived.includes('192.168.43.255')) {
               sendTo(buf, '192.168.43.255');
             }
@@ -256,12 +251,25 @@ export function startNearbyHost(opts: {
       const answerMeta = new Map<string, { n: number; name: string }>();
       const rejectedIds = new Set<string>();
 
-      (socket as any).on('message', (msg: any) => {
+      (socket as any).on('message', (msg: any, rinfo: any) => {
         if (done) return;
         try {
           const text = typeof msg === 'string' ? msg : msg.toString();
-          const data = JSON.parse(text) as ChunkMsg;
-          if (data.m !== MAGIC || data.kind !== 'answer' || !data.id) return;
+          const raw = JSON.parse(text) as ChunkMsg | ProbeMsg;
+          if (raw.m !== MAGIC) return;
+
+          if (raw.kind === 'probe') {
+            const addr = rinfo?.address as string | undefined;
+            if (addr && !guestAddrs.has(addr) && guestAddrs.size < 4) {
+              guestAddrs.add(addr);
+              logInfo('nearby', `host got probe → unicasting offer to ${addr}`);
+              for (const c of chunks) sendTo(JSON.stringify(c), addr);
+            }
+            return;
+          }
+
+          const data = raw as ChunkMsg;
+          if (data.kind !== 'answer' || !data.id) return;
           if (rejectedIds.has(data.id)) return;
 
           if (!answerParts.has(data.id)) answerParts.set(data.id, new Map());
@@ -328,6 +336,8 @@ export type NearbyGuestResult = {
  * `onReady` receives a cancel() immediately (see startNearbyHost).
  */
 export function startNearbyGuest(opts: {
+  /** Shown to the host in probes (optional). */
+  name?: string;
   onStatus?: (s: string) => void;
   onReady?: (cancel: () => void) => void;
 }): Promise<NearbyGuestResult> {
@@ -335,14 +345,17 @@ export function startNearbyGuest(opts: {
     let socket: NearbySocket | null = null;
     let timeout: ReturnType<typeof setTimeout> | null = null;
     let answerTimer: ReturnType<typeof setInterval> | null = null;
+    let probeTimer: ReturnType<typeof setInterval> | null = null;
     let done = false;
     logInfo('nearby', 'guest listening');
 
     const stop = () => {
       if (timeout) clearTimeout(timeout);
       if (answerTimer) clearInterval(answerTimer);
+      if (probeTimer) clearInterval(probeTimer);
       timeout = null;
       answerTimer = null;
+      probeTimer = null;
       try {
         socket?.close();
       } catch {
@@ -370,6 +383,39 @@ export function startNearbyGuest(opts: {
         } catch {
           /* */
         }
+        if (done) return;
+
+        // A phone that hosts a hotspot does NOT push 255.255.255.255 out of its hotspot
+        // interface, so the guest also actively probes: unicast to the likely gateway
+        // (= the hotspot phone) and the subnet broadcast. The host answers by unicast.
+        let targets: string[] = [...COMMON_GATEWAYS, '255.255.255.255'];
+        const probe: ProbeMsg = {
+          m: MAGIC,
+          kind: 'probe',
+          id: makeId(),
+          name: safeName(opts.name),
+        };
+        const sendProbes = () => {
+          const buf = JSON.stringify(probe);
+          for (const addr of targets) {
+            try {
+              socket?.send(buf, 0, buf.length, PORT, addr);
+            } catch {
+              /* */
+            }
+          }
+        };
+        sendProbes();
+        probeTimer = setInterval(sendProbes, 700);
+        void getLocalPrivateIPv4s().then((ips) => {
+          if (done || ips.length === 0) {
+            logInfo('nearby', `guest probe targets unchanged (local IPv4 unknown)`);
+            return;
+          }
+          const learned = ips.slice(0, 2).flatMap((ip) => [gatewayGuess(ip), broadcastFor(ip)]);
+          targets = Array.from(new Set([...learned, ...targets]));
+          logInfo('nearby', `guest probing ${targets.length} targets (own subnet learned: ${ips.length})`);
+        });
       });
       opts.onStatus?.('Looking for nearby room…');
 
@@ -420,6 +466,8 @@ export function startNearbyGuest(opts: {
           done = true;
           if (timeout) clearTimeout(timeout);
           timeout = null;
+          if (probeTimer) clearInterval(probeTimer); // found a host — stop probing, keep socket for the answer
+          probeTimer = null;
           const hostAddr = meta.rinfo.address;
           logInfo(
             'nearby',

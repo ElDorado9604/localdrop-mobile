@@ -19,6 +19,7 @@ import { setOfflineSession, clearOfflineSession } from '../src/lib/offlineSessio
 import { PairingMethodPicker } from '../src/components/PairingMethodPicker';
 import { startNearbyGuest, isNearbyCancelled } from '../src/lib/nearbyPairing';
 import { logInfo, logWarn, logError, describeError } from '../src/lib/logger';
+import { summarizeCandidates } from '../src/lib/netUtil';
 import { getDisplayName } from '../src/lib/deviceName';
 
 /** How long the guest waits for the host to tap Accept before giving up. */
@@ -191,6 +192,7 @@ export default function OfflineJoinScreen() {
     try {
       const displayName = await getDisplayName();
       const guest = await startNearbyGuest({
+        name: displayName,
         onStatus: setStatus,
         onReady: (cancel) => {
           nearbyStopRef.current = cancel;
@@ -221,6 +223,13 @@ export default function OfflineJoinScreen() {
         session.close();
         guest.stop();
         return;
+      }
+      {
+        const sum = summarizeCandidates(answer?.sdp ?? '');
+        logInfo(
+          'offline-join',
+          `answer candidates: lanIPv4=${sum.hostIpv4Private} [${sum.maskedPrivate.join(',')}] ipv6=${sum.hostIpv6} tcp=${sum.tcp}`
+        );
       }
       const payload = encodeRoomAnswer({
         code: decoded.code,

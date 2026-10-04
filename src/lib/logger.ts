@@ -189,8 +189,18 @@ export function describeUri(uri?: string | null): string {
   if (segs.includes('tree')) kind = ' kind=tree';
   else if (segs.includes('document')) kind = ' kind=document';
   const id = segs[segs.length - 1] || '';
-  const idPrefix = /^([a-z]+):/i.exec(decodeURIComponent(id))?.[1];
-  return `scheme=${scheme} authority=${authority || '(none)'}${kind}${idPrefix ? ` idPrefix=${idPrefix}` : ''}`;
+  let idPrefix: string | undefined;
+  try {
+    idPrefix = /^([a-z]+):/i.exec(decodeURIComponent(id))?.[1];
+  } catch {
+    /* malformed escape — leave undefined */
+  }
+  // A SAF document URI has exactly ONE path segment after "document" (the id is %-encoded).
+  // More than one means the URI was percent-decoded somewhere (e.g. via router params) and
+  // Android will refuse it even though the picker granted access to the original.
+  const di = segs.indexOf('document');
+  const decodedSuspect = scheme === 'content' && di >= 0 && segs.length - di - 1 > 1;
+  return `scheme=${scheme} authority=${authority || '(none)'}${kind}${idPrefix ? ` idPrefix=${idPrefix}` : ''}${decodedSuspect ? ' [URI-DECODED?]' : ''}`;
 }
 
 /** Name + message + native code for an unknown thrown value. */

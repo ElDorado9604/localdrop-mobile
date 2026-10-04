@@ -30,6 +30,8 @@ export type ProtocolMessage =
       totalFiles: number;
     }
   | { type: 'file-complete'; fileId: string }
+  /** Receiver → sender: bytes of `fileId` durably written so far (flow control, offline rooms). */
+  | { type: 'write-progress'; fileId: string; bytes: number }
   | { type: 'transfer-complete' }
   | { type: 'transfer-ack' }
   | { type: 'transfer-cancelled' }

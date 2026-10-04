@@ -16,6 +16,7 @@ import { randomId } from '../src/lib/transferProtocol';
 import { buildJoinUrl } from '../src/lib/config';
 import { getDisplayName } from '../src/lib/deviceName';
 import { logInfo, describeUri, redactName } from '../src/lib/logger';
+import { setPendingFiles } from '../src/lib/pendingFilesStore';
 
 type FileInfo = {
   id: string;
@@ -159,23 +160,25 @@ export default function SendScreen() {
       'send',
       `navigating to transfer with ${files.length} file(s); ms since last pick=${pickedAtRef.current ? Date.now() - pickedAtRef.current : 'n/a'}`
     );
+    // File URIs must not travel through router params (they get percent-decoded and break
+    // the SAF permission grant) — hand them over via an in-memory store instead.
+    setPendingFiles(
+      files.map((f) => ({
+        id: f.id,
+        name: f.name,
+        size: f.size,
+        type: f.type || 'application/octet-stream',
+        uri: f.uri,
+        status: 'pending' as const,
+        progress: 0,
+      }))
+    );
     router.push({
       pathname: '/transfer' as any,
       params: {
         role: 'sender',
         peerName: peerName || 'peer',
         mode: mode || 'online',
-        filesJson: JSON.stringify(
-          files.map((f) => ({
-            id: f.id,
-            name: f.name,
-            size: f.size,
-            type: f.type || 'application/octet-stream',
-            uri: f.uri,
-            status: 'pending',
-            progress: 0,
-          }))
-        ),
       },
     });
   }

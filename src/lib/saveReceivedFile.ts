@@ -260,6 +260,31 @@ export async function removeManyFromReceivedIndex(ids: string[]) {
   await writeIndex(list.filter((x) => !set.has(x.id)));
 }
 
+/** Headroom kept free on top of the incoming files. */
+const SPACE_MARGIN_BYTES = 50 * 1024 * 1024;
+
+/**
+ * Is there room for `requiredBytes` (+ margin) before we accept an offer?
+ * Only internal storage can be measured; an SD-card save folder is not checked (ok = true).
+ */
+export async function checkStorageFor(
+  requiredBytes: number
+): Promise<{ ok: boolean; freeBytes?: number }> {
+  try {
+    const uri = await getSaveDirectoryUri();
+    if (uri && uri.startsWith('content://')) {
+      const m = uri.match(/\/tree\/([^?]+)/);
+      const decoded = m ? decodeURIComponent(m[1]) : '';
+      if (!decoded.startsWith('primary:')) return { ok: true };
+    }
+    const free = await FileSystem.getFreeDiskStorageAsync();
+    if (!(free >= 0)) return { ok: true };
+    return { ok: free >= requiredBytes + SPACE_MARGIN_BYTES, freeBytes: free };
+  } catch {
+    return { ok: true };
+  }
+}
+
 export async function ensureSaveFolderOrPrompt(): Promise<boolean> {
   return ensureWritableSaveDirectory();
 }

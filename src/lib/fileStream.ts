@@ -218,6 +218,10 @@ export async function streamFileChunks(
       return;
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
+      // A cancel / channel drop / receiver stall is not a read failure — pass it through as is.
+      if (/^(Transfer cancelled|Channel closed|The other device stopped responding)/.test(msg)) {
+        throw e;
+      }
       const isPerm =
         /Permission|denied|SecurityException|obtain access|OPEN_DOCUMENT/i.test(msg);
       logError(

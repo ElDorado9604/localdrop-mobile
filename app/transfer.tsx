@@ -35,6 +35,7 @@ import {
   ensureAppLocalDropDir,
   ensureWritableSaveDirectory,
   setupPublicSaveFolder,
+  checkStorageFor,
 } from '../src/lib/saveReceivedFile';
 import { streamFileChunks } from '../src/lib/fileStream';
 import type { ReceivedFileWriter } from '../src/lib/fileStream';
@@ -104,6 +105,11 @@ export default function TransferScreen() {
     >
   >(new Map());
   const msgQueueRef = useRef<Promise<void>>(Promise.resolve());
+  // Completion bookkeeping lives in refs (not React state) so checks right after
+  // a file finishes are never stale.
+  const sendAllOkRef = useRef(false);
+  const recvDoneIdsRef = useRef<Set<string>>(new Set());
+  const expectedRecvRef = useRef(0);
 
   const logTransferStart = useCallback(async (role: 'sender' | 'receiver') => {
     const enabled = await getCacheCopySmallFiles();
@@ -166,11 +172,6 @@ export default function TransferScreen() {
     });
   }, []);
 
-  const allFilesOk = useCallback(() => {
-    const q = queueRef.current;
-    return q.length > 0 && q.every((f) => f.status === 'completed');
-  }, []);
-
   const resetTurn = useCallback(() => {
     cancelledRef.current = false;
     offerSentRef.current = false;
@@ -181,6 +182,9 @@ export default function TransferScreen() {
     setError(null);
     setOffer(null);
     awaitingTransferAckRef.current = false;
+    sendAllOkRef.current = false;
+    recvDoneIdsRef.current.clear();
+    expectedRecvRef.current = 0;
     if (transferAckTimerRef.current) {
       clearTimeout(transferAckTimerRef.current);
       transferAckTimerRef.current = null;
@@ -220,6 +224,8 @@ export default function TransferScreen() {
     const total = pending.reduce((s, f) => s + f.size, 0);
     setBytesTotal(total);
     setBytesDone(0);
+    sendAllOkRef.current = false;
+    const sentOk = new Set<string>();
 
     for (let i = 0; i < pending.length; i++) {
       if (cancelledRef.current) break;
@@ -267,6 +273,7 @@ export default function TransferScreen() {
 
         session.sendJson({ type: 'file-complete', fileId: item.id });
         logInfo('transfer', `file ${i + 1}/${pending.length} sent ok (${item.size} bytes)`);
+        sentOk.add(item.id);
         updateFile(item.id, { status: 'completed', progress: 100 });
       } catch (e) {
         const msg = e instanceof Error ? e.message : 'Send failed';
@@ -283,7 +290,8 @@ export default function TransferScreen() {
       }
     }
 
-    if (!cancelledRef.current && allFilesOk()) {
+    if (!cancelledRef.current && sentOk.size === pending.length) {
+      sendAllOkRef.current = true;
       logInfo('transfer', 'all files sent; waiting for receiver ack');
       session.sendJson({ type: 'transfer-complete' });
       awaitingTransferAckRef.current = true;
@@ -305,7 +313,7 @@ export default function TransferScreen() {
       setPhase('failed');
       setError(msg);
     }
-  }, [updateFile, allFilesOk]);
+  }, [updateFile]);
 
   const sendTransferOffer = useCallback(async () => {
     const session = sessionRef.current;
@@ -461,6 +469,17 @@ export default function TransferScreen() {
 
       if (msg.type === 'transfer-offer') {
         await logTransferStart('receiver');
+        const space = await checkStorageFor(msg.totalSize);
+        if (!space.ok) {
+          const reason = `Not enough storage on the receiving device: needs ${formatBytes(msg.totalSize)}, only ${formatBytes(space.freeBytes ?? 0)} free.`;
+          logWarn('transfer', reason);
+          sessionRef.current?.sendJson({ type: 'transfer-rejected', reason });
+          setError(reason);
+          setPhase('ready');
+          return;
+        }
+        expectedRecvRef.current = msg.files.length;
+        recvDoneIdsRef.current.clear();
         setOffer({
           files: msg.files,
           totalSize: msg.totalSize,
@@ -483,7 +502,10 @@ export default function TransferScreen() {
       } else if (msg.type === 'transfer-accepted') {
         void runSend();
       } else if (msg.type === 'transfer-rejected') {
-        const msgText = 'Receiver declined the transfer.';
+        const msgText =
+          msg.reason && msg.reason !== 'declined'
+            ? msg.reason
+            : 'Receiver declined the transfer.';
         logWarn('transfer', msgText);
         offerSentRef.current = false;
         setPhase('ready');
@@ -592,6 +614,7 @@ export default function TransferScreen() {
             displayPath: saved.displayPath,
           });
           setSaveHint(`Saved to ${saved.displayPath}`);
+          recvDoneIdsRef.current.add(msg.fileId);
           writersRef.current.delete(msg.fileId);
         } catch (e) {
           const errMsg = e instanceof Error ? e.message : 'Save failed';
@@ -608,7 +631,10 @@ export default function TransferScreen() {
           writersRef.current.delete(msg.fileId);
         }
       } else if (msg.type === 'transfer-complete') {
-        if (allFilesOk()) {
+        if (
+          expectedRecvRef.current > 0 &&
+          recvDoneIdsRef.current.size >= expectedRecvRef.current
+        ) {
           const session = sessionRef.current;
           if (session) {
             session.sendJson({ type: 'transfer-ack' });
@@ -626,7 +652,7 @@ export default function TransferScreen() {
         if (
           !cancelledRef.current &&
           canFinalizeTransferAsSender({
-            allFilesCompleted: allFilesOk(),
+            allFilesCompleted: sendAllOkRef.current,
             peerSentTransferAck: true,
           })
         ) {
@@ -653,7 +679,7 @@ export default function TransferScreen() {
         setError(errMsg);
       }
     },
-    [updateFile, runSend, allFilesOk]
+    [updateFile, runSend]
   );
 
   useEffect(() => {

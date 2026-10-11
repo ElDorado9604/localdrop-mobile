@@ -35,6 +35,7 @@ import {
   createStreamingWriter,
   ensureWritableSaveDirectory,
   setupPublicSaveFolder,
+  checkStorageFor,
 } from '../src/lib/saveReceivedFile';
 import { streamFileChunks } from '../src/lib/fileStream';
 import type { ReceivedFileWriter } from '../src/lib/fileStream';
@@ -359,6 +360,15 @@ export default function OfflineSessionScreen() {
 
       if (msg.type === 'transfer-offer') {
         await logTransferStart('receiver');
+        const space = await checkStorageFor(msg.totalSize);
+        if (!space.ok) {
+          const reason = `Not enough storage on the receiving device: needs ${formatBytes(msg.totalSize)}, only ${formatBytes(space.freeBytes ?? 0)} free.`;
+          logWarn('offline-transfer', reason);
+          session?.sendJson({ type: 'transfer-rejected', reason });
+          setError(reason);
+          setPhase('ready');
+          return;
+        }
         setOffer({
           files: msg.files,
           totalSize: msg.totalSize,
@@ -391,7 +401,8 @@ export default function OfflineSessionScreen() {
         startTimeRef.current = Date.now();
         void runSend();
       } else if (msg.type === 'transfer-rejected') {
-        const msgText = 'File transfer was declined.';
+        const msgText =
+          msg.reason && msg.reason !== 'declined' ? msg.reason : 'File transfer was declined.';
         logWarn('offline-transfer', msgText);
         setPhase('ready');
         setError(msgText);

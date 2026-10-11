@@ -10,28 +10,16 @@ import {
   Image,
 } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import * as DocumentPicker from 'expo-document-picker';
 import { createRoom, cancelRoom, getSocket } from '../src/lib/socket';
-import { randomId } from '../src/lib/transferProtocol';
 import { buildJoinUrl } from '../src/lib/config';
 import { getDisplayName } from '../src/lib/deviceName';
-import { logInfo, describeUri, redactName } from '../src/lib/logger';
-import { setPendingFiles } from '../src/lib/pendingFilesStore';
-
-type FileInfo = {
-  id: string;
-  name: string;
-  size: number;
-  uri: string;
-  type?: string;
-};
+import { clearPendingFiles } from '../src/lib/pendingFilesStore';
 
 export default function SendScreen() {
   const { mode } = useLocalSearchParams<{ mode: string }>();
   const router = useRouter();
   const isOffline = mode === 'offline';
 
-  const [files, setFiles] = useState<FileInfo[]>([]);
   const [status, setStatus] = useState<'idle' | 'creating' | 'waiting' | 'connected'>('idle');
   const [pairingCode, setPairingCode] = useState<string | null>(null);
   const [peerName, setPeerName] = useState<string | null>(null);
@@ -40,16 +28,23 @@ export default function SendScreen() {
   const statusRef = useRef(status);
   statusRef.current = status;
   const activeRoomRef = useRef(false);
-  const pickedAtRef = useRef<number>(0);
 
   useEffect(() => {
     if (isOffline) return;
 
     const s = getSocket();
 
+    // Same as the web app: once the receiver joins, go straight to the transfer
+    // screen (WebRTC connects there); files are picked AFTER the link is up.
     const onPeerJoined = (data: { peerName: string }) => {
       setPeerName(data.peerName);
       setStatus('connected');
+      activeRoomRef.current = false;
+      clearPendingFiles();
+      router.push({
+        pathname: '/transfer' as any,
+        params: { role: 'sender', peerName: data.peerName || 'peer', mode: 'online' },
+      });
     };
 
     const onPeerLeft = () => {
@@ -83,49 +78,9 @@ export default function SendScreen() {
     };
   }, [isOffline]);
 
-  async function pickFiles() {
-    try {
-      const result = await DocumentPicker.getDocumentAsync({
-        multiple: true,
-        copyToCacheDirectory: false,
-      });
-      if (result.canceled) {
-        logInfo('send', 'picker cancelled (send screen)');
-        return;
-      }
-      const picked: FileInfo[] = result.assets.map((a) => ({
-        id: randomId(),
-        name: a.name,
-        size: a.size ?? 0,
-        uri: a.uri,
-        type: a.mimeType,
-      }));
-      pickedAtRef.current = Date.now();
-      logInfo('send', `picked on send screen: ${picked.length} file(s)`);
-      picked.forEach((f, i) =>
-        logInfo(
-          'send',
-          `picked[${i}] ${redactName(f.name)} size=${f.size}${f.size === 0 ? ' [NO SIZE]' : ''} mime=${f.type || '(none)'} ${describeUri(f.uri)}`
-        )
-      );
-      setFiles((prev) => [...prev, ...picked]);
-    } catch {
-      Alert.alert('Error', 'Could not pick files');
-    }
-  }
-
-  function removeFile(index: number) {
-    setFiles((prev) => prev.filter((_, i) => i !== index));
-  }
-
   async function startSending() {
     if (isOffline) {
       router.push('/offline-host' as any);
-      return;
-    }
-
-    if (files.length === 0) {
-      Alert.alert('No files', 'Please select at least one file');
       return;
     }
 
@@ -152,41 +107,6 @@ export default function SendScreen() {
     setPairingCode(null);
     setPeerName(null);
     setError(null);
-  }
-
-  function goToTransfer() {
-    activeRoomRef.current = false;
-    logInfo(
-      'send',
-      `navigating to transfer with ${files.length} file(s); ms since last pick=${pickedAtRef.current ? Date.now() - pickedAtRef.current : 'n/a'}`
-    );
-    // File URIs must not travel through router params (they get percent-decoded and break
-    // the SAF permission grant) — hand them over via an in-memory store instead.
-    setPendingFiles(
-      files.map((f) => ({
-        id: f.id,
-        name: f.name,
-        size: f.size,
-        type: f.type || 'application/octet-stream',
-        uri: f.uri,
-        status: 'pending' as const,
-        progress: 0,
-      }))
-    );
-    router.push({
-      pathname: '/transfer' as any,
-      params: {
-        role: 'sender',
-        peerName: peerName || 'peer',
-        mode: mode || 'online',
-      },
-    });
-  }
-
-  function formatSize(bytes: number) {
-    if (bytes < 1024) return `${bytes} B`;
-    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
   }
 
   const joinUrl = pairingCode ? buildJoinUrl(pairingCode) : null;
@@ -218,39 +138,12 @@ export default function SendScreen() {
     <ScrollView style={styles.container} contentContainerStyle={styles.content}>
       <Text style={styles.modeLabel}>Mode: Online (Signaling Server)</Text>
       <Text style={styles.wifiHint}>Both devices must be on the same Wi‑Fi (not mobile data).</Text>
-
-      <View style={styles.section}>
-        <Text style={styles.sectionTitle}>Files to send</Text>
-        {files.length === 0 ? (
-          <Text style={styles.empty}>No files selected</Text>
-        ) : (
-          files.map((f, i) => (
-            <View key={f.id} style={styles.fileRow}>
-              <View style={{ flex: 1 }}>
-                <Text style={styles.fileName} numberOfLines={1}>{f.name}</Text>
-                <Text style={styles.fileSize}>{formatSize(f.size)}</Text>
-              </View>
-              {status === 'idle' && (
-                <Pressable onPress={() => removeFile(i)} style={styles.removeBtn}>
-                  <Text style={styles.removeText}>✕</Text>
-                </Pressable>
-              )}
-            </View>
-          ))
-        )}
-        {status === 'idle' && (
-          <Pressable style={styles.secondaryBtn} onPress={pickFiles}>
-            <Text style={styles.secondaryBtnText}>+ Add Files</Text>
-          </Pressable>
-        )}
-      </View>
+      <Text style={styles.offlineNote}>
+        Create a pairing code, let the other device join, then choose the files to send.
+      </Text>
 
       {status === 'idle' && (
-        <Pressable
-          style={[styles.primaryBtn, files.length === 0 && styles.btnDisabled]}
-          onPress={startSending}
-          disabled={files.length === 0}
-        >
+        <Pressable style={styles.primaryBtn} onPress={startSending}>
           <Text style={styles.primaryBtnText}>Create Pairing Code</Text>
         </Pressable>
       )}
@@ -286,9 +179,6 @@ export default function SendScreen() {
           {status === 'connected' && (
             <>
               <Text style={styles.connectedText}>Connected to {peerName || 'peer'}</Text>
-              <Pressable style={[styles.primaryBtn, { marginTop: 20, width: '100%' }]} onPress={goToTransfer}>
-                <Text style={styles.primaryBtnText}>Start Transfer</Text>
-              </Pressable>
             </>
           )}
           <Pressable style={styles.cancelBtn} onPress={cancel}>

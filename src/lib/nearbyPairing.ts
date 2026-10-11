@@ -109,8 +109,39 @@ export function isNearbyCancelled(e: unknown): boolean {
   return e instanceof Error && e.name === 'NearbyCancelledError';
 }
 
+/** react-native-udp can emit plain objects, which String() turns into "[object Object]". */
+function errText(e: unknown): string {
+  if (e instanceof Error) return e.message;
+  if (typeof e === 'string') return e;
+  try {
+    const o = e as any;
+    return String(o?.message || o?.error || o?.code || JSON.stringify(e));
+  } catch {
+    return String(e);
+  }
+}
+
+/**
+ * Only a busy port is fatal. Per-send failures (ENETUNREACH when the hotspot phone has no
+ * default route because mobile data is off, unreachable gateway guesses, ...) must NOT end
+ * pairing — other targets (probe replies, directed broadcast) can still work.
+ */
+function isFatalSocketError(e: unknown): boolean {
+  return /EADDRINUSE|address already in use/i.test(errText(e));
+}
+
+function makeSendWarner(tag: string) {
+  const seen = new Set<string>();
+  return (e: unknown) => {
+    const t = errText(e);
+    if (seen.has(t) || seen.size >= 5) return;
+    seen.add(t);
+    logWarn('nearby', `${tag} send warning (ignored): ${t}`);
+  };
+}
+
 function friendlySocketError(e: unknown): Error {
-  const raw = e instanceof Error ? e.message : String(e);
+  const raw = errText(e);
   if (/EADDRINUSE|address already in use/i.test(raw)) {
     return new Error(
       'Nearby pairing is still busy from a previous try. Wait a few seconds and try again.'
@@ -162,6 +193,7 @@ export function startNearbyHost(opts: {
     let done = false;
     const id = makeId();
     const hostName = safeName(opts.name);
+    const warnSend = makeSendWarner('host');
     const chunks = splitPayload(id, 'offer', opts.offerRaw, {
       name: hostName,
       code: opts.code,
@@ -199,7 +231,9 @@ export function startNearbyHost(opts: {
 
     const sendTo = (buf: string, addr: string) => {
       try {
-        socket?.send(buf, 0, buf.length, PORT, addr);
+        socket?.send(buf, 0, buf.length, PORT, addr, (err?: unknown) => {
+          if (err) warnSend(err);
+        });
       } catch {
         /* */
       }
@@ -307,10 +341,14 @@ export function startNearbyHost(opts: {
       });
 
       (socket as any).on('error', (e: any) => {
+        if (!done && !isFatalSocketError(e)) {
+          warnSend(e);
+          return;
+        }
         if (!done) {
           done = true;
           stop();
-          logError('nearby', `host socket error: ${e}`);
+          logError('nearby', `host socket error: ${errText(e)}`);
           reject(friendlySocketError(e));
         }
       });
@@ -348,6 +386,7 @@ export function startNearbyGuest(opts: {
     let probeTimer: ReturnType<typeof setInterval> | null = null;
     let done = false;
     logInfo('nearby', 'guest listening');
+    const warnSend = makeSendWarner('guest');
 
     const stop = () => {
       if (timeout) clearTimeout(timeout);
@@ -399,7 +438,9 @@ export function startNearbyGuest(opts: {
           const buf = JSON.stringify(probe);
           for (const addr of targets) {
             try {
-              socket?.send(buf, 0, buf.length, PORT, addr);
+              socket?.send(buf, 0, buf.length, PORT, addr, (err?: unknown) => {
+          if (err) warnSend(err);
+        });
             } catch {
               /* */
             }
@@ -491,12 +532,16 @@ export function startNearbyGuest(opts: {
                 for (const c of chunks) {
                   const buf = JSON.stringify(c);
                   try {
-                    socket?.send(buf, 0, buf.length, PORT, hostAddr);
+                    socket?.send(buf, 0, buf.length, PORT, hostAddr, (err?: unknown) => {
+          if (err) warnSend(err);
+        });
                   } catch {
                     /* */
                   }
                   try {
-                    socket?.send(buf, 0, buf.length, PORT, '255.255.255.255');
+                    socket?.send(buf, 0, buf.length, PORT, '255.255.255.255', (err?: unknown) => {
+          if (err) warnSend(err);
+        });
                   } catch {
                     /* */
                   }
@@ -515,10 +560,14 @@ export function startNearbyGuest(opts: {
       });
 
       (socket as any).on('error', (e: any) => {
+        if (!done && !isFatalSocketError(e)) {
+          warnSend(e);
+          return;
+        }
         if (!done) {
           done = true;
           stop();
-          logError('nearby', `guest socket error: ${e}`);
+          logError('nearby', `guest socket error: ${errText(e)}`);
           reject(friendlySocketError(e));
         }
       });

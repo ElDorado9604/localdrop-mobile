@@ -36,7 +36,8 @@
     "react-native-webrtc": "124.0.7",
     "react-native-worklets": "0.10.1",
     "saf-stream": "file:./modules/saf-stream",
-    "socket.io-client": "^4.8.1"
+    "socket.io-client": "^4.8.1",
+    "transfer-service": "file:./modules/transfer-service"
   },
   "devDependencies": {
     "@babel/core": "^7.25.2",

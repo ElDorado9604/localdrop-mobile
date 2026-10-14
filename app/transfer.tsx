@@ -42,6 +42,7 @@ import type { ReceivedFileWriter } from '../src/lib/fileStream';
 import { getDisplayName } from '../src/lib/deviceName';
 import { logError, logInfo, logWarn, describeUri, describeError, redactName } from '../src/lib/logger';
 import { getPendingFiles, clearPendingFiles } from '../src/lib/pendingFilesStore';
+import { useTransferForeground } from '../src/lib/useTransferForeground';
 
 type QueuedFile = {
   id: string;
@@ -799,6 +800,36 @@ export default function TransferScreen() {
     setOffer(null);
     setPhase('ready');
   }
+
+  // Notification "Cancel" button: same effect as the peer cancelling.
+  const cancelFromNotification = useCallback(() => {
+    logWarn('transfer', 'cancel requested from notification');
+    cancelledRef.current = true;
+    try {
+      sessionRef.current?.sendJson({ type: 'transfer-cancelled' });
+    } catch {
+      /* channel may already be closed */
+    }
+    for (const [, entry] of writersRef.current) {
+      entry.writer.abort().catch(() => {});
+    }
+    writersRef.current.clear();
+    setPhase('ready');
+    setError('Transfer cancelled.');
+  }, []);
+
+  // Keep the transfer alive (foreground service + progress notification) while the user
+  // is in other apps.
+  useTransferForeground({
+    phase,
+    role: titleRole === 'sender' ? 'sender' : 'receiver',
+    peerName,
+    bytesDone,
+    bytesTotal,
+    speed,
+    error,
+    onCancel: cancelFromNotification,
+  });
 
   const progress =
     bytesTotal > 0 ? Math.min(100, Math.round((bytesDone / bytesTotal) * 100)) : 0;

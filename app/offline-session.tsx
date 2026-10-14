@@ -41,6 +41,7 @@ import { streamFileChunks } from '../src/lib/fileStream';
 import type { ReceivedFileWriter } from '../src/lib/fileStream';
 import { getDisplayName } from '../src/lib/deviceName';
 import { setTransferKeepAwake } from '../src/lib/keepTransferAwake';
+import { useTransferForeground } from '../src/lib/useTransferForeground';
 import { logError, logInfo, logWarn, describeUri, describeError, redactName } from '../src/lib/logger';
 
 type QueuedFile = {
@@ -779,6 +780,47 @@ export default function OfflineSessionScreen() {
     setPhase('ready');
   }
 
+  /** Cancel the transfer and close the room (shared by Leave Room and the notification button). */
+  const cancelAndLeave = useCallback(() => {
+    cancelledRef.current = true;
+    try {
+      getOfflineSession()?.sendJson({ type: 'transfer-cancelled' });
+    } catch {
+      /* */
+    }
+    for (const [, entry] of writersRef.current) {
+      entry.writer.abort().catch(() => {});
+    }
+    writersRef.current.clear();
+    setTimeout(() => {
+      clearOfflineSession();
+      router.replace('/offline' as any);
+    }, 150);
+  }, [router]);
+
+  const cancelFromNotification = useCallback(() => {
+    logWarn('offline-transfer', 'cancel requested from notification');
+    cancelAndLeave();
+  }, [cancelAndLeave]);
+
+  // Files we picked have a uri; files offered to us don't — tells us which side we are.
+  const foregroundRole: 'sender' | 'receiver' = queue.some((f) => !!f.uri)
+    ? 'sender'
+    : 'receiver';
+
+  // Keep the transfer alive (foreground service + progress notification) while the user
+  // is in other apps.
+  useTransferForeground({
+    phase,
+    role: foregroundRole,
+    peerName,
+    bytesDone,
+    bytesTotal,
+    speed,
+    error,
+    onCancel: cancelFromNotification,
+  });
+
   function leaveRoom() {
     const transferring = phaseRef.current === 'transferring';
     Alert.alert(
@@ -791,22 +833,7 @@ export default function OfflineSessionScreen() {
         {
           text: 'Leave Room',
           style: 'destructive',
-          onPress: () => {
-            cancelledRef.current = true;
-            try {
-              getOfflineSession()?.sendJson({ type: 'transfer-cancelled' });
-            } catch {
-              /* */
-            }
-            for (const [, entry] of writersRef.current) {
-              entry.writer.abort().catch(() => {});
-            }
-            writersRef.current.clear();
-            setTimeout(() => {
-              clearOfflineSession();
-              router.replace('/offline' as any);
-            }, 150);
-          },
+          onPress: cancelAndLeave,
         },
       ]
     );

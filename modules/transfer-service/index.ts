@@ -10,6 +10,8 @@ type TransferServiceNative = {
   update(title: string, text: string, subText: string | null, progress: number): Promise<void>;
   stop(): Promise<void>;
   isRunning(): Promise<boolean>;
+  getEnvironment(): Promise<string>;
+  startNetworkWatch(): Promise<void>;
   showResult(title: string, text: string, success: boolean): Promise<void>;
   isIgnoringBatteryOptimizations(): Promise<boolean>;
   requestIgnoreBatteryOptimizations(): Promise<boolean>;
@@ -130,6 +132,53 @@ export function onTransferServiceAction(
   }
 }
 
+export type EnvironmentNetwork = {
+  transports: string[];
+  internet: boolean;
+  validated: boolean;
+  active: boolean;
+  iface: string;
+  addrs: string[];
+};
+
+export type EnvironmentSnapshot = {
+  sdk: number;
+  device: string;
+  batteryExempt?: boolean;
+  powerSave?: boolean;
+  notificationsEnabled?: boolean;
+  airplane?: boolean;
+  wifiEnabled?: boolean;
+  networks: EnvironmentNetwork[];
+  interfaces: { name: string; ipv4: string[] }[];
+  permissions: { granted: string[]; denied: string[] };
+  networkError?: string;
+  interfaceError?: string;
+  permissionError?: string;
+};
+
+/** Network / interface / permission / power snapshot for the Diagnostics log. */
+export async function getEnvironmentSnapshot(): Promise<EnvironmentSnapshot | null> {
+  const mod = getNative();
+  if (!mod) return null;
+  try {
+    return JSON.parse(await mod.getEnvironment()) as EnvironmentSnapshot;
+  } catch {
+    return null;
+  }
+}
+
+/** Start logging network changes (Wi-Fi/cellular/hotspot appearing, changing, lost). */
+export async function startNetworkWatch(): Promise<void> {
+  const mod = getNative();
+  if (!mod) return;
+  try {
+    await mod.startNetworkWatch();
+  } catch {
+    /* ignore */
+  }
+}
+
 /** Log lines produced inside the native service (start/stop, locks, refusals, timeouts). */
 export function onTransferServiceLog(
   listener: (level: TransferServiceLogLevel, message: string) => void
@@ -158,4 +207,6 @@ export default {
   requestIgnoreBatteryOptimizations,
   onAction: onTransferServiceAction,
   onLog: onTransferServiceLog,
+  getEnvironmentSnapshot,
+  startNetworkWatch,
 };

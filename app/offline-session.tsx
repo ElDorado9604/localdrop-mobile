@@ -42,6 +42,7 @@ import type { ReceivedFileWriter } from '../src/lib/fileStream';
 import { getDisplayName } from '../src/lib/deviceName';
 import { setTransferKeepAwake } from '../src/lib/keepTransferAwake';
 import { useTransferForeground } from '../src/lib/useTransferForeground';
+import { logEnvironment } from '../src/lib/environmentDiagnostics';
 import { logError, logInfo, logWarn, describeUri, describeError, redactName } from '../src/lib/logger';
 
 type QueuedFile = {
@@ -119,6 +120,7 @@ export default function OfflineSessionScreen() {
   const logTransferStart = useCallback(async (role: 'sender' | 'receiver') => {
     const enabled = await getCacheCopySmallFiles();
     logInfo('offline-transfer', `start ${describeTransferStart(role, enabled)}`);
+    void logEnvironment('offline-session');
   }, []);
 
   useEffect(() => {

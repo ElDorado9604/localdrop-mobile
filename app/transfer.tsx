@@ -43,6 +43,7 @@ import { getDisplayName } from '../src/lib/deviceName';
 import { logError, logInfo, logWarn, describeUri, describeError, redactName } from '../src/lib/logger';
 import { getPendingFiles, clearPendingFiles } from '../src/lib/pendingFilesStore';
 import { useTransferForeground } from '../src/lib/useTransferForeground';
+import { logEnvironment } from '../src/lib/environmentDiagnostics';
 
 type QueuedFile = {
   id: string;
@@ -115,6 +116,7 @@ export default function TransferScreen() {
   const logTransferStart = useCallback(async (role: 'sender' | 'receiver') => {
     const enabled = await getCacheCopySmallFiles();
     logInfo('transfer', `start ${describeTransferStart(role, enabled)}`);
+    void logEnvironment('transfer');
   }, []);
 
   useEffect(() => {

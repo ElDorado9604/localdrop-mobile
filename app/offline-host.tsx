@@ -23,6 +23,7 @@ import { setOfflineSession, clearOfflineSession } from '../src/lib/offlineSessio
 import { PairingMethodPicker } from '../src/components/PairingMethodPicker';
 import { startNearbyHost, isNearbyCancelled } from '../src/lib/nearbyPairing';
 import { logInfo, logWarn, logError, describeError } from '../src/lib/logger';
+import { logEnvironment } from '../src/lib/environmentDiagnostics';
 import { summarizeCandidates } from '../src/lib/netUtil';
 import { getDisplayName } from '../src/lib/deviceName';
 
@@ -113,6 +114,10 @@ export default function OfflineHostScreen() {
     sessionRef.current = null;
     offerRawRef.current = null;
     startedRef.current = false;
+  }, []);
+
+  useEffect(() => {
+    void logEnvironment('offline-host');
   }, []);
 
   // Unmount (hardware back, swipe) — stop broadcasting and release the socket/pc.

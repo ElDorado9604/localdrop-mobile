@@ -19,6 +19,7 @@ import { setOfflineSession, clearOfflineSession } from '../src/lib/offlineSessio
 import { PairingMethodPicker } from '../src/components/PairingMethodPicker';
 import { startNearbyGuest, isNearbyCancelled } from '../src/lib/nearbyPairing';
 import { logInfo, logWarn, logError, describeError } from '../src/lib/logger';
+import { logEnvironment } from '../src/lib/environmentDiagnostics';
 import { summarizeCandidates } from '../src/lib/netUtil';
 import { getDisplayName } from '../src/lib/deviceName';
 
@@ -64,6 +65,10 @@ export default function OfflineJoinScreen() {
     }
     sessionRef.current = null;
   }, [clearAcceptTimer]);
+
+  useEffect(() => {
+    void logEnvironment('offline-join');
+  }, []);
 
   useEffect(() => {
     return () => teardown();

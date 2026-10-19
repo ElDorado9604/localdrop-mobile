@@ -5,6 +5,7 @@ import { StatusBar } from 'expo-status-bar';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { initLocalDropStorage } from '../src/lib/saveReceivedFile';
 import { initLogger } from '../src/lib/logger';
+import { startEnvironmentWatcher } from '../src/lib/environmentDiagnostics';
 
 function SettingsHeaderButton() {
   const router = useRouter();
@@ -19,6 +20,7 @@ export default function RootLayout() {
   useEffect(() => {
     void initLocalDropStorage();
     void initLogger();
+    return startEnvironmentWatcher();
   }, []);
 
   return (

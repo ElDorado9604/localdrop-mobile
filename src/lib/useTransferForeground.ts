@@ -14,9 +14,7 @@ import { Alert, AppState, PermissionsAndroid, Platform } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import {
   isIgnoringBatteryOptimizations,
-  isTransferServiceAvailable,
   onTransferServiceAction,
-  onTransferServiceLog,
   requestIgnoreBatteryOptimizations,
   showTransferResult,
   startTransferService,
@@ -28,7 +26,7 @@ import {
   buildResultNotification,
   type NotificationRole,
 } from './transferNotificationText';
-import { logError, logInfo, logWarn } from './logger';
+import { logInfo, logWarn } from './logger';
 
 const TAG = 'foreground';
 const BATTERY_PROMPTED_KEY = 'localdrop.batteryPrompted.v1';
@@ -106,17 +104,30 @@ export function useTransferForeground(params: TransferForegroundParams): void {
   const serviceOn = useRef(false);
   const starting = useRef(false);
   const prevPhase = useRef(params.phase);
+  const lastPushAt = useRef(0);
+  const hiddenPushLogged = useRef(false);
+
+  // Push the latest progress to the notification, at most once per second.
+  // NOTE: JS timers (setInterval) are paused by React Native on Android while the app is in the
+  // background, so this is also called from the progress changes themselves (data arriving).
+  const pushProgress = (force = false) => {
+    if (!serviceOn.current) return;
+    const now = Date.now();
+    if (!force && now - lastPushAt.current < UPDATE_INTERVAL_MS) return;
+    lastPushAt.current = now;
+    const n = buildProgressNotification(latest.current);
+    if (AppState.currentState !== 'active' && !hiddenPushLogged.current) {
+      hiddenPushLogged.current = true;
+      logInfo(TAG, `first progress update while app hidden: ${n.progress}%`);
+    }
+    void updateTransferService(n.title, n.text, n.subText ?? null, n.progress);
+  };
 
   // Service lifetime == transferring phase.
   useEffect(() => {
     if (!active) return;
     let disposed = false;
-
-    const push = () => {
-      if (!serviceOn.current) return;
-      const n = buildProgressNotification(latest.current);
-      void updateTransferService(n.title, n.text, n.subText ?? null, n.progress);
-    };
+    hiddenPushLogged.current = false;
 
     (async () => {
       starting.current = true;
@@ -132,7 +143,7 @@ export function useTransferForeground(params: TransferForegroundParams): void {
         serviceOn.current = ok;
         logInfo(TAG, ok ? 'foreground service started' : 'foreground service NOT started');
         if (ok) {
-          push();
+          pushProgress(true);
           void maybeAskBatteryExemption();
         }
       } finally {
@@ -140,7 +151,8 @@ export function useTransferForeground(params: TransferForegroundParams): void {
       }
     })();
 
-    const timer = setInterval(push, UPDATE_INTERVAL_MS);
+    // Foreground fallback only; does not fire while the app is hidden.
+    const timer = setInterval(() => pushProgress(), UPDATE_INTERVAL_MS);
 
     return () => {
       disposed = true;
@@ -151,16 +163,11 @@ export function useTransferForeground(params: TransferForegroundParams): void {
     };
   }, [active]);
 
-  // Native service log lines -> Diagnostics log.
+  // Event-driven updates: runs whenever progress changes, including while the app is hidden.
   useEffect(() => {
-    logInfo(TAG, `native transfer-service module available=${isTransferServiceAvailable()}`);
-    return onTransferServiceLog((level, message) => {
-      const line = `native: ${message}`;
-      if (level === 'error') logError(TAG, line);
-      else if (level === 'warn') logWarn(TAG, line);
-      else logInfo(TAG, line);
-    });
-  }, []);
+    if (active) pushProgress();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active, params.bytesDone, params.speed]);
 
   // Notification Cancel button + Android 15 time-limit callback.
   useEffect(() => {

@@ -110,6 +110,17 @@ class TransferServiceModule : Module() {
       Unit
     }
 
+    /** JSON string: network, interfaces, permissions, power state. */
+    AsyncFunction("getEnvironment") {
+      EnvironmentSnapshot.collect(appCtx())
+    }
+
+    /** Start logging network changes (idempotent). */
+    AsyncFunction("startNetworkWatch") {
+      NetworkWatcher.start(appCtx())
+      Unit
+    }
+
     AsyncFunction("isIgnoringBatteryOptimizations") {
       val ctx = appCtx()
       val pm = ctx.getSystemService(Context.POWER_SERVICE) as PowerManager

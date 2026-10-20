@@ -42,6 +42,7 @@ import type { ReceivedFileWriter } from '../src/lib/fileStream';
 import { getDisplayName } from '../src/lib/deviceName';
 import { setTransferKeepAwake } from '../src/lib/keepTransferAwake';
 import { useTransferForeground } from '../src/lib/useTransferForeground';
+import { ackSignal, waitForWake } from '../src/lib/wakeSignal';
 import { logEnvironment } from '../src/lib/environmentDiagnostics';
 import { logError, logInfo, logWarn, describeUri, describeError, redactName } from '../src/lib/logger';
 
@@ -241,7 +242,8 @@ export default function OfflineSessionScreen() {
               if (Date.now() - ackTickRef.current > ACK_STALL_MS) {
                 throw new Error('The other device stopped responding while saving the file.');
               }
-              await new Promise((r) => setTimeout(r, 40));
+              // Woken by acks / the native tick, so it keeps going while the app is hidden.
+              await waitForWake(40, ackSignal);
             }
             await session.sendBinary(chunk);
             sentChunks++;
@@ -544,6 +546,7 @@ export default function OfflineSessionScreen() {
           if (msg.bytes > ackedBytesRef.current) {
             ackedBytesRef.current = msg.bytes;
             ackTickRef.current = Date.now();
+            ackSignal.notify();
           }
         }
       } else if (msg.type === 'transfer-complete') {

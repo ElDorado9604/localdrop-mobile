@@ -10,7 +10,9 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.net.wifi.WifiManager
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.os.PowerManager
 import android.util.Log
 
@@ -37,6 +39,12 @@ class TransferForegroundService : Service() {
 
     /** Safety net so a leaked lock can never drain the battery forever. */
     private const val WAKELOCK_TIMEOUT_MS = 12L * 60L * 60L * 1000L
+
+    /**
+     * While running, emit a "tick" to JS this often. React Native pauses JS timers when the app
+     * is in the background, but native events keep flowing, so JS waits are woken by these.
+     */
+    private const val TICK_INTERVAL_MS = 200L
 
     /** JS asked for the service to run. Guards the start()/stop() race (stop before onStartCommand). */
     @Volatile
@@ -135,6 +143,18 @@ class TransferForegroundService : Service() {
 
   private var isForeground = false
   private var updateFailureLogged = false
+  private val handler = Handler(Looper.getMainLooper())
+  private val tickRunnable = object : Runnable {
+    override fun run() {
+      if (!isForeground) return
+      try {
+        actionListener?.invoke("tick")
+      } catch (_: Exception) {
+        // JS side may be gone
+      }
+      handler.postDelayed(this, TICK_INTERVAL_MS)
+    }
+  }
   private var wakeLock: PowerManager.WakeLock? = null
   private var wifiLock: WifiManager.WifiLock? = null
 
@@ -189,6 +209,8 @@ class TransferForegroundService : Service() {
     }
 
     acquireLocks()
+    handler.removeCallbacks(tickRunnable)
+    handler.postDelayed(tickRunnable, TICK_INTERVAL_MS)
 
     // stop() may have been called before the service finished starting.
     if (!wanted) {
@@ -234,6 +256,7 @@ class TransferForegroundService : Service() {
 
   fun shutdown() {
     log("info", "shutdown (foreground=$isForeground)")
+    handler.removeCallbacks(tickRunnable)
     releaseLocks()
     if (isForeground) {
       stopForeground(Service.STOP_FOREGROUND_REMOVE)
@@ -243,6 +266,7 @@ class TransferForegroundService : Service() {
   }
 
   override fun onDestroy() {
+    handler.removeCallbacks(tickRunnable)
     releaseLocks()
     isForeground = false
     if (instance === this) instance = null

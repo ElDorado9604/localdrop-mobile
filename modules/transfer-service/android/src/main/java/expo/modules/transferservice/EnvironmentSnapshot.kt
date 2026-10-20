@@ -68,6 +68,16 @@ object EnvironmentSnapshot {
     try {
       val wm = ctx.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
       out.put("wifiEnabled", wm.isWifiEnabled)
+      if (wm.isWifiEnabled) {
+        // Link details of the Wi-Fi network we are a client of (SSID is hidden without location).
+        @Suppress("DEPRECATION")
+        val info = wm.connectionInfo
+        if (info != null && info.linkSpeed > 0) {
+          out.put("wifiLinkMbps", info.linkSpeed)
+          out.put("wifiRssi", info.rssi)
+          out.put("wifiFreqMhz", info.frequency)
+        }
+      }
     } catch (_: Exception) {
     }
 

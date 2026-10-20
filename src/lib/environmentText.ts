@@ -26,6 +26,45 @@ const IGNORED_DENIED = new Set(['READ_EXTERNAL_STORAGE', 'WRITE_EXTERNAL_STORAGE
 const onOff = (v: boolean | undefined) => (v === undefined ? '?' : v ? 'on' : 'off');
 const yesNo = (v: boolean | undefined) => (v === undefined ? '?' : v ? 'yes' : 'no');
 
+export type WifiRole = 'hotspot-host' | 'wifi-client' | 'wifi-client+hotspot' | 'none';
+
+const HOTSPOT_IFACE = /^(ap\d*|swlan\d*|softap\d*|wlan[1-9]\d*)$/i;
+
+/**
+ * Best-effort guess: Android has no public "is the hotspot on" API, so combine the Wi-Fi switch,
+ * the Wi-Fi networks and hotspot-style interface names.
+ */
+export function wifiRole(s: EnvironmentSnapshot): { role: WifiRole; reason: string } {
+  const wifiNetworks = s.networks.filter((n) => n.transports.includes('WIFI'));
+  const apIface = s.interfaces.find((i) => HOTSPOT_IFACE.test(i.name));
+  const switchOn = s.wifiEnabled === true;
+
+  if (switchOn && wifiNetworks.length > 0 && apIface) {
+    return { role: 'wifi-client+hotspot', reason: `Wi-Fi on with a network and ${apIface.name} up` };
+  }
+  if (apIface) {
+    return { role: 'hotspot-host', reason: `hotspot interface ${apIface.name} has IPv4` };
+  }
+  if (!switchOn && wifiNetworks.length > 0) {
+    return {
+      role: 'hotspot-host',
+      reason: 'Wi-Fi switch is off but a Wi-Fi network is up (typical when sharing a hotspot)',
+    };
+  }
+  if (switchOn && wifiNetworks.length > 0) {
+    return { role: 'wifi-client', reason: 'Wi-Fi on and connected to a network' };
+  }
+  if (switchOn) return { role: 'none', reason: 'Wi-Fi on but not connected to any network' };
+  return { role: 'none', reason: 'Wi-Fi off and no hotspot detected' };
+}
+
+function wifiBand(freq?: number): string {
+  if (!freq) return '';
+  if (freq < 3000) return '2.4GHz';
+  if (freq < 5925) return '5GHz';
+  return '6GHz';
+}
+
 export function internetState(s: EnvironmentSnapshot): 'online' | 'no-internet' | 'no-network' {
   if (s.networks.some((n) => n.internet && n.validated)) return 'online';
   return s.networks.length > 0 ? 'no-internet' : 'no-network';
@@ -76,6 +115,16 @@ export function formatEnvironment(context: string, s: EnvironmentSnapshot): EnvL
         .join(' ; ')
     : 'none';
   lines.push({ level: 'info', message: `env[${context}] networks: ${nets}` });
+
+  const wr = wifiRole(s);
+  const link =
+    s.wifiLinkMbps && s.wifiLinkMbps > 0
+      ? ` link=${s.wifiLinkMbps}Mbps ${wifiBand(s.wifiFreqMhz)} rssi=${s.wifiRssi}dBm`.replace('  ', ' ')
+      : '';
+  lines.push({
+    level: wr.role === 'none' ? 'warn' : 'info',
+    message: `env[${context}] wifiRole=${wr.role} (guess: ${wr.reason})${link}`,
+  });
 
   const ifaces = s.interfaces.length
     ? s.interfaces.map((i) => `${i.name}=${i.ipv4.join(',')}`).join(' ')

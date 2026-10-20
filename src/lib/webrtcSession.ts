@@ -14,6 +14,7 @@ import {
 } from './webrtc';
 import { waitForIceComplete } from './offlineSignal';
 import { logError, logInfo, logVerbose, logWarn } from './logger';
+import { backgroundTick } from './wakeSignal';
 
 type SignalHandler = (type: 'offer' | 'answer' | 'ice-candidate', payload: any) => void;
 
@@ -255,9 +256,11 @@ export class WebRTCSession {
     while ((ch.bufferedAmount ?? 0) > BUFFER_HIGH) {
       await new Promise<void>((resolve) => {
         let settled = false;
+        let unsubTick: () => void = () => {};
         const done = () => {
           if (settled) return;
           settled = true;
+          unsubTick();
           try {
             ch.removeEventListener?.('bufferedamountlow', done);
           } catch {
@@ -271,6 +274,8 @@ export class WebRTCSession {
         } catch {
           /* */
         }
+        // Native tick wakes this even while JS timers are paused (app in background).
+        unsubTick = backgroundTick.once(done);
         setTimeout(done, 20);
       });
       if (ch.readyState !== 'open') throw new Error('Channel closed');

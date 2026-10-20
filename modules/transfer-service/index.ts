@@ -1,7 +1,7 @@
 import { requireNativeModule } from 'expo-modules-core';
 import { Platform } from 'react-native';
 
-export type TransferServiceAction = 'cancel' | 'timeout';
+export type TransferServiceAction = 'cancel' | 'timeout' | 'tick';
 
 type Subscription = { remove(): void };
 
@@ -124,7 +124,9 @@ export function onTransferServiceAction(
   if (!mod) return () => {};
   try {
     const sub = mod.addListener('onAction', (e) => {
-      if (e.action === 'cancel' || e.action === 'timeout') listener(e.action);
+      if (e.action === 'cancel' || e.action === 'timeout' || e.action === 'tick') {
+        listener(e.action);
+      }
     });
     return () => sub.remove();
   } catch {
@@ -149,6 +151,9 @@ export type EnvironmentSnapshot = {
   notificationsEnabled?: boolean;
   airplane?: boolean;
   wifiEnabled?: boolean;
+  wifiLinkMbps?: number;
+  wifiRssi?: number;
+  wifiFreqMhz?: number;
   networks: EnvironmentNetwork[];
   interfaces: { name: string; ipv4: string[] }[];
   permissions: { granted: string[]; denied: string[] };

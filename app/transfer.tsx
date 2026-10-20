@@ -43,6 +43,7 @@ import { getDisplayName } from '../src/lib/deviceName';
 import { logError, logInfo, logWarn, describeUri, describeError, redactName } from '../src/lib/logger';
 import { getPendingFiles, clearPendingFiles } from '../src/lib/pendingFilesStore';
 import { useTransferForeground } from '../src/lib/useTransferForeground';
+import { waitForWake } from '../src/lib/wakeSignal';
 import { logEnvironment } from '../src/lib/environmentDiagnostics';
 
 type QueuedFile = {
@@ -584,7 +585,7 @@ export default function TransferScreen() {
           entry.receivedBytes = written;
           if (written >= target) break;
           if (target > 0 && written / target >= 0.999) break;
-          await new Promise((r) => setTimeout(r, 40));
+          await waitForWake(40);
         }
 
         const finalBytes = Math.max(

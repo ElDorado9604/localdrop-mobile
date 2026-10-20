@@ -27,6 +27,7 @@ import {
   type NotificationRole,
 } from './transferNotificationText';
 import { logInfo, logWarn } from './logger';
+import { backgroundTick } from './wakeSignal';
 
 const TAG = 'foreground';
 const BATTERY_PROMPTED_KEY = 'localdrop.batteryPrompted.v1';
@@ -106,6 +107,7 @@ export function useTransferForeground(params: TransferForegroundParams): void {
   const prevPhase = useRef(params.phase);
   const lastPushAt = useRef(0);
   const hiddenPushLogged = useRef(false);
+  const hiddenTickLogged = useRef(false);
 
   // Push the latest progress to the notification, at most once per second.
   // NOTE: JS timers (setInterval) are paused by React Native on Android while the app is in the
@@ -128,6 +130,7 @@ export function useTransferForeground(params: TransferForegroundParams): void {
     if (!active) return;
     let disposed = false;
     hiddenPushLogged.current = false;
+    hiddenTickLogged.current = false;
 
     (async () => {
       starting.current = true;
@@ -172,7 +175,16 @@ export function useTransferForeground(params: TransferForegroundParams): void {
   // Notification Cancel button + Android 15 time-limit callback.
   useEffect(() => {
     return onTransferServiceAction((action) => {
-      if (action === 'cancel') {
+      if (action === 'tick') {
+        // Native heartbeat: keeps waits and notification updates moving while JS timers are
+        // paused (app in background).
+        if (AppState.currentState !== 'active' && !hiddenTickLogged.current) {
+          hiddenTickLogged.current = true;
+          logInfo(TAG, 'native tick reaching JS while app hidden (background waits are woken)');
+        }
+        backgroundTick.notify();
+        pushProgress();
+      } else if (action === 'cancel') {
         logWarn(TAG, 'cancel pressed in notification');
         latest.current.onCancel();
       } else if (action === 'timeout') {

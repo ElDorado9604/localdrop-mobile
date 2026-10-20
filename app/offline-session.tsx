@@ -111,6 +111,8 @@ export default function OfflineSessionScreen() {
   /** File currently being received (set by file-start, cleared on complete/abort). */
   const rxFileIdRef = useRef<string | null>(null);
   const lastAckSentRef = useRef(0);
+  const rxStartAtRef = useRef(0);
+  const rxFirstChunkPendingRef = useRef(false);
   /** Sender side: bytes of the current outbound file the peer reports as written. */
   const ackedBytesRef = useRef(0);
   const ackFileIdRef = useRef<string | null>(null);
@@ -227,6 +229,7 @@ export default function OfflineSessionScreen() {
         ackedBytesRef.current = 0;
         ackTickRef.current = Date.now();
 
+        let windowLogged = false;
         await streamFileChunks(
           item.uri!,
           item.size,
@@ -237,6 +240,13 @@ export default function OfflineSessionScreen() {
               peerAcksRef.current &&
               sentBytes - ackedBytesRef.current >= SEND_WINDOW_BYTES
             ) {
+              if (!windowLogged) {
+                windowLogged = true;
+                logInfo(
+                  'offline-transfer',
+                  `send window full: sent=${sentBytes} acked=${ackedBytesRef.current} (receiver is behind)`
+                );
+              }
               if (cancelledRef.current) throw new Error('Transfer cancelled');
               if (!session.isChannelOpen()) throw new Error('Channel closed');
               if (Date.now() - ackTickRef.current > ACK_STALL_MS) {
@@ -319,6 +329,13 @@ export default function OfflineSessionScreen() {
         try {
           await entry.writer.writeChunk(data);
           entry.receivedBytes += data.byteLength;
+          if (rxFirstChunkPendingRef.current) {
+            rxFirstChunkPendingRef.current = false;
+            logInfo(
+              'offline-transfer',
+              `rx first chunk written ${Date.now() - rxStartAtRef.current} ms after file-start`
+            );
+          }
           // Tell the sender how far we really got so it can pace itself (≈ every 1 MB).
           if (entry.receivedBytes - lastAckSentRef.current >= ACK_EVERY_BYTES) {
             lastAckSentRef.current = entry.receivedBytes;
@@ -413,6 +430,8 @@ export default function OfflineSessionScreen() {
         setError(msgText);
       } else if (msg.type === 'file-start') {
         const totalChunks = Math.ceil(msg.size / OFFLINE_CHUNK_SIZE) || 1;
+        rxStartAtRef.current = Date.now();
+        rxFirstChunkPendingRef.current = true;
 
         if (!(await ensureWritableSaveDirectory())) {
           const ok = await setupPublicSaveFolder();
@@ -430,6 +449,10 @@ export default function OfflineSessionScreen() {
 
         try {
           const writer = await createStreamingWriter(msg.name, msg.mime, msg.size);
+          logInfo(
+            'offline-transfer',
+            `rx writer ready ${Date.now() - rxStartAtRef.current} ms after file-start`
+          );
           writersRef.current.set(msg.fileId, {
             meta: { id: msg.fileId, name: msg.name, size: msg.size, type: msg.mime },
             writer,
@@ -542,6 +565,12 @@ export default function OfflineSessionScreen() {
         }
       } else if (msg.type === 'write-progress') {
         if (msg.fileId === ackFileIdRef.current) {
+          if (!peerAcksRef.current) {
+            logInfo(
+              'offline-transfer',
+              `first ack from receiver ${Date.now() - startTimeRef.current} ms after transfer start (acked=${msg.bytes}); flow control now active`
+            );
+          }
           peerAcksRef.current = true;
           if (msg.bytes > ackedBytesRef.current) {
             ackedBytesRef.current = msg.bytes;

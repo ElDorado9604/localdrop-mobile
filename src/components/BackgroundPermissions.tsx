@@ -2,7 +2,7 @@
  * Status + Allow buttons for the permissions that keep background transfers reliable.
  * Used by the first-launch setup screen and by Settings.
  */
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { AppState, Pressable, StyleSheet, Text, View } from 'react-native';
 import {
   getPermissionStates,
@@ -15,6 +15,7 @@ import {
   type PermKey,
   type PermResult,
 } from '../lib/permissionUi';
+import { logInfo } from '../lib/logger';
 
 type States = Record<PermKey, boolean>;
 
@@ -22,8 +23,18 @@ export function BackgroundPermissions({ onChange }: { onChange?: (s: States) => 
   const [states, setStates] = useState<States | null>(null);
   const [previous, setPrevious] = useState<Partial<Record<PermKey, PermResult>>>({});
 
+  const lastLogged = useRef<States | null>(null);
+
   const refresh = useCallback(async () => {
     const s = await getPermissionStates();
+    const prev = lastLogged.current;
+    if (!prev || PERMISSION_ROWS.some((r) => prev[r.key] !== s[r.key])) {
+      lastLogged.current = s;
+      logInfo(
+        'setup',
+        `permission state: notifications=${s.notifications} battery=${s.battery} camera=${s.camera}`
+      );
+    }
     setStates(s);
     onChange?.(s);
   }, [onChange]);

@@ -46,7 +46,7 @@ export function buildProgressNotification(i: ProgressInput): ProgressNotificatio
   if (i.bytesDone <= 0) {
     return {
       title,
-      text: i.role === 'sender' ? 'Waiting for the other device…' : 'Starting…',
+      text: i.role === 'sender' ? 'Waiting for the other device…' : 'Preparing to save…',
       progress: 0,
     };
   }

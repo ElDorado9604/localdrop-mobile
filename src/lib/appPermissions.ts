@@ -92,8 +92,13 @@ export async function requestPermission(key: PermKey): Promise<PermResult> {
     } else if (key === 'camera') {
       result = mapResult(await PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.CAMERA));
     } else {
+      // The system dialog is a separate screen; the real answer is logged when the app resumes.
       const opened = await requestIgnoreBatteryOptimizations();
-      result = opened ? 'denied' : 'blocked';
+      logInfo(
+        'setup',
+        `request battery -> ${opened ? 'dialog opened (result logged on return)' : 'dialog could not open'}`
+      );
+      return opened ? 'denied' : 'blocked';
     }
   } catch (e) {
     logWarn('setup', `request ${key} failed: ${String(e)}`);

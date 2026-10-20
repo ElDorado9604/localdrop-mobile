@@ -76,6 +76,8 @@ export default function TransferScreen() {
   >('connecting');
   const [queue, setQueue] = useState<QueuedFile[]>([]);
   const [bytesDone, setBytesDone] = useState(0);
+  const rxStartAtRef = useRef(0);
+  const rxFirstChunkPendingRef = useRef(false);
   const [bytesTotal, setBytesTotal] = useState(0);
   const [speed, setSpeed] = useState(0);
   const [offer, setOffer] = useState<{
@@ -442,6 +444,13 @@ export default function TransferScreen() {
         try {
           await entry.writer.writeChunk(data);
           entry.receivedBytes += data.byteLength;
+          if (rxFirstChunkPendingRef.current) {
+            rxFirstChunkPendingRef.current = false;
+            logInfo(
+              'transfer',
+              `rx first chunk written ${Date.now() - rxStartAtRef.current} ms after file-start`
+            );
+          }
           const progress = Math.min(
             99,
             Math.round((entry.receivedBytes / Math.max(1, entry.meta.size)) * 100)
@@ -516,6 +525,8 @@ export default function TransferScreen() {
         setError(msgText);
       } else if (msg.type === 'file-start') {
         const totalChunks = Math.ceil(msg.size / ONLINE_CHUNK_SIZE) || 1;
+        rxStartAtRef.current = Date.now();
+        rxFirstChunkPendingRef.current = true;
         setTitleRole('receiver');
 
         if (!(await ensureWritableSaveDirectory())) {
@@ -535,6 +546,10 @@ export default function TransferScreen() {
 
         try {
           const writer = await createStreamingWriter(msg.name, msg.mime, msg.size);
+          logInfo(
+            'transfer',
+            `rx writer ready ${Date.now() - rxStartAtRef.current} ms after file-start`
+          );
           writersRef.current.set(msg.fileId, {
             meta: { id: msg.fileId, name: msg.name, size: msg.size, type: msg.mime },
             writer,

@@ -70,6 +70,7 @@ export function startEnvironmentWatcher(): () => void {
 
   let prev = AppState.currentState;
   const sub = AppState.addEventListener('change', (next) => {
+    if (next === prev) return;
     logInfo('app', `app state: ${prev} -> ${next}`);
     prev = next;
     if (next === 'active') void checkPermissionChange();

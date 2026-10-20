@@ -15,6 +15,7 @@ import { useLocalSearchParams, useRouter, useFocusEffect } from 'expo-router';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import { decodeRoomPayload } from '../src/lib/offlineSignal';
 import { logInfo, logWarn } from '../src/lib/logger';
+import { logEnvironment } from '../src/lib/environmentDiagnostics';
 
 const { width: SCREEN_W } = Dimensions.get('window');
 const FRAME = Math.min(SCREEN_W * 0.72, 280);
@@ -35,6 +36,7 @@ export default function OfflineScanScreen() {
       setHint(null);
       setCameraKey((k) => k + 1);
       logInfo('qr', `scan screen open expect=${expectType}`);
+      void logEnvironment('offline-scan');
     }, [expectType])
   );
 

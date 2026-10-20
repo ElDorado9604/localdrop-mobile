@@ -30,6 +30,8 @@ export type ProtocolMessage =
       totalFiles: number;
     }
   | { type: 'file-complete'; fileId: string }
+  /** Receiver → sender: bytes of `fileId` durably written so far (flow control, offline rooms). */
+  | { type: 'write-progress'; fileId: string; bytes: number }
   | { type: 'transfer-complete' }
   | { type: 'transfer-ack' }
   | { type: 'transfer-cancelled' }
@@ -39,11 +41,12 @@ export function randomId(): string {
   return Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
 }
 
+/** Decimal units (1 MB = 1,000,000 B) so sizes match the Android Files app and Google Files. */
 export function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+  if (bytes < 1000) return `${bytes} B`;
+  if (bytes < 1000 * 1000) return `${(bytes / 1000).toFixed(1)} KB`;
+  if (bytes < 1000 * 1000 * 1000) return `${(bytes / (1000 * 1000)).toFixed(1)} MB`;
+  return `${(bytes / (1000 * 1000 * 1000)).toFixed(2)} GB`;
 }
 
 export function formatSpeed(bytesPerSec: number): string {

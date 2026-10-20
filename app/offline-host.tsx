@@ -23,6 +23,8 @@ import { setOfflineSession, clearOfflineSession } from '../src/lib/offlineSessio
 import { PairingMethodPicker } from '../src/components/PairingMethodPicker';
 import { startNearbyHost, isNearbyCancelled } from '../src/lib/nearbyPairing';
 import { logInfo, logWarn, logError, describeError } from '../src/lib/logger';
+import { logEnvironment } from '../src/lib/environmentDiagnostics';
+import { summarizeCandidates } from '../src/lib/netUtil';
 import { getDisplayName } from '../src/lib/deviceName';
 
 export default function OfflineHostScreen() {
@@ -44,6 +46,7 @@ export default function OfflineHostScreen() {
   );
   const [error, setError] = useState<string | null>(null);
   const [myName, setMyName] = useState('Device');
+  const [netHint, setNetHint] = useState<string | null>(null);
   const sessionRef = useRef<WebRTCSession | null>(null);
   const codeRef = useRef('');
   const nameRef = useRef('Device');
@@ -113,6 +116,10 @@ export default function OfflineHostScreen() {
     startedRef.current = false;
   }, []);
 
+  useEffect(() => {
+    void logEnvironment('offline-host');
+  }, []);
+
   // Unmount (hardware back, swipe) — stop broadcasting and release the socket/pc.
   useEffect(() => {
     return () => teardown();
@@ -125,8 +132,26 @@ export default function OfflineHostScreen() {
     setRoomCode('');
     setError(null);
     setStatus('');
+    setNetHint(null);
     setPhase('choose-method');
   }, [teardown]);
+
+  /** Log what addresses WebRTC will offer; warn when none is on a Wi‑Fi/hotspot LAN. */
+  const reportNetwork = useCallback((local: any) => {
+    const sum = summarizeCandidates(local?.sdp ?? '');
+    logInfo(
+      'offline-host',
+      `offer candidates: lanIPv4=${sum.hostIpv4Private} [${sum.maskedPrivate.join(',')}] otherIPv4=${sum.hostIpv4Other} ipv6=${sum.hostIpv6} srflx=${sum.srflx} relay=${sum.relay} tcp=${sum.tcp}`
+    );
+    if (sum.hostIpv4Private === 0) {
+      logWarn('offline-host', 'no private IPv4 host candidate — LAN connection may fail (hotspot owner?)');
+      setNetHint(
+        'This phone reports no Wi‑Fi/hotspot address for the connection. If the other phone cannot connect, put both phones on the same Wi‑Fi router instead of using this phone’s hotspot, then try again.'
+      );
+    } else {
+      setNetHint(null);
+    }
+  }, []);
 
   const makeSession = useCallback(
     (attempt: number) => {
@@ -180,6 +205,7 @@ export default function OfflineHostScreen() {
         session.close();
         return;
       }
+      reportNetwork(local);
       const payload = encodeRoomOffer({
         code,
         name: displayName,
@@ -270,6 +296,7 @@ export default function OfflineHostScreen() {
         session.close();
         return;
       }
+      reportNetwork(local);
       offerRawRef.current = encodeRoomOffer({
         code,
         name: displayName,
@@ -363,6 +390,7 @@ export default function OfflineHostScreen() {
           {!!roomCode && <Text style={styles.codeLabel}>Room {roomCode}</Text>}
           <Text style={styles.deviceName}>You: {myName}</Text>
           <Text style={styles.waiting}>{status || 'Broadcasting…'}</Text>
+          {netHint ? <Text style={styles.hint}>{netHint}</Text> : null}
           <Pressable style={styles.cancelBtn} onPress={cancelRoom}>
             <Text style={styles.cancelText}>Cancel Room</Text>
           </Pressable>
@@ -381,6 +409,7 @@ export default function OfflineHostScreen() {
           <Text style={styles.deviceName}>You: {myName}</Text>
           {!!roomCode && <Text style={styles.codeLabel}>Room {roomCode}</Text>}
           <Text style={styles.waiting}>Waiting for the other device…</Text>
+          {netHint ? <Text style={styles.hint}>{netHint}</Text> : null}
           <Pressable
             style={styles.primaryBtn}
             onPress={() =>

@@ -1,5 +1,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
+vi.mock('./localAddresses', () => ({
+  getLocalPrivateIPv4s: vi.fn(async () => ['192.168.77.23']),
+}));
+
 vi.mock('./logger', () => ({
   logInfo: vi.fn(),
   logWarn: vi.fn(),
@@ -239,5 +243,54 @@ describe('startNearbyGuest', () => {
     cancel();
     await assertion;
     expect(sockets[0].closed).toBe(true);
+  });
+});
+
+describe('hotspot discovery (guest probes, host unicasts)', () => {
+  it('guest immediately probes common gateways + broadcast, then its own subnet gateway', async () => {
+    const p = startNearbyGuest({ name: 'Guest' });
+    p.catch(() => {});
+    await Promise.resolve();
+    const s = sockets[0];
+    await vi.advanceTimersByTimeAsync(0);
+    const first = new Set(s.sent.map((x: any) => x.addr));
+    expect(first.has('192.168.43.1')).toBe(true); // classic Android hotspot gateway
+    expect(first.has('255.255.255.255')).toBe(true);
+    expect(JSON.parse(s.sent[0].buf).kind).toBe('probe');
+
+    await vi.advanceTimersByTimeAsync(800);
+    const later = new Set(s.sent.map((x: any) => x.addr));
+    expect(later.has('192.168.77.1')).toBe(true); // learned gateway guess
+    expect(later.has('192.168.77.255')).toBe(true); // learned subnet broadcast
+  });
+
+  it('guest stops probing once an offer is received', async () => {
+    const p = startNearbyGuest({});
+    await Promise.resolve();
+    const s = sockets[0];
+    deliver(s, splitPayload('o9', 'offer', offerRaw(), { name: 'Host', code: '123456' }));
+    await p;
+    const before = s.sent.length;
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(s.sent.length).toBe(before);
+  });
+
+  it('host answers a probe by unicasting the offer to the prober, and keeps doing so', async () => {
+    const p = startNearbyHost({ offerRaw: offerRaw(), name: 'Host', code: '123456' });
+    p.catch(() => {});
+    await Promise.resolve();
+    const s = sockets[0];
+    s.emit(
+      'message',
+      JSON.stringify({ m: 'LDN1', kind: 'probe', id: 'g1', name: 'Guest' }),
+      { address: '192.168.43.57' }
+    );
+    const direct = s.sent.filter((x: any) => x.addr === '192.168.43.57');
+    expect(direct.length).toBeGreaterThan(0);
+    expect(JSON.parse(direct[0].buf).kind).toBe('offer');
+
+    const n = direct.length;
+    await vi.advanceTimersByTimeAsync(500);
+    expect(s.sent.filter((x: any) => x.addr === '192.168.43.57').length).toBeGreaterThan(n);
   });
 });

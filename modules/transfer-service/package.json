@@ -1,0 +1,15 @@
+{
+  "name": "transfer-service",
+  "version": "1.0.0",
+  "description": "Android foreground service + ongoing progress notification so LocalDrop transfers keep running in the background",
+  "main": "index.ts",
+  "types": "index.ts",
+  "scripts": {},
+  "keywords": ["expo", "android", "foreground-service"],
+  "license": "MIT",
+  "peerDependencies": {
+    "expo": "*",
+    "react": "*",
+    "react-native": "*"
+  }
+}

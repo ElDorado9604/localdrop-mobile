@@ -19,8 +19,17 @@ function SettingsHeaderButton() {
 export default function RootLayout() {
   useEffect(() => {
     void initLocalDropStorage();
-    void initLogger();
-    return startEnvironmentWatcher();
+    // Start the watcher only after the persisted logs are loaded, so its first lines are not
+    // pushed ahead of older entries.
+    let stop: (() => void) | undefined;
+    let cancelled = false;
+    void initLogger().then(() => {
+      if (!cancelled) stop = startEnvironmentWatcher();
+    });
+    return () => {
+      cancelled = true;
+      stop?.();
+    };
   }, []);
 
   return (
@@ -42,6 +51,7 @@ export default function RootLayout() {
           }}
         />
         <Stack.Screen name="settings" options={{ title: 'Settings' }} />
+        <Stack.Screen name="setup" options={{ title: 'Set up' }} />
         <Stack.Screen name="send" options={{ title: 'Send Files' }} />
         <Stack.Screen name="receive" options={{ title: 'Receive Files' }} />
         <Stack.Screen name="transfer" options={{ title: 'Transfer' }} />

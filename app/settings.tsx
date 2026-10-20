@@ -28,6 +28,7 @@ import {
   setVerboseLogging,
   logInfo,
 } from '../src/lib/logger';
+import { BackgroundPermissions } from '../src/components/BackgroundPermissions';
 
 export default function SettingsScreen() {
   const router = useRouter();
@@ -129,6 +130,15 @@ export default function SettingsScreen() {
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.content}>
       <Text style={styles.title}>Settings</Text>
+
+      <Text style={styles.section}>Background transfers</Text>
+      <View style={styles.card}>
+        <BackgroundPermissions />
+        <Text style={styles.status}>
+          None of these is required for a transfer to work. Allowing them keeps large transfers
+          running while you use other apps.
+        </Text>
+      </View>
 
       <View style={styles.card}>
         <View style={styles.row}>

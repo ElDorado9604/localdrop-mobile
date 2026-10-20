@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import {
   View,
   Text,
@@ -6,6 +6,7 @@ import {
   Pressable,
   ScrollView,
   Platform,
+  AppState,
   Alert,
   Image,
   ActivityIndicator,
@@ -13,6 +14,8 @@ import {
   Modal,
 } from 'react-native';
 import { Link, useFocusEffect, useRouter } from 'expo-router';
+import { getPermissionStates, isSetupDone, markSetupDone } from '../src/lib/appPermissions';
+import { allGranted, backgroundBannerText, type PermKey } from '../src/lib/permissionUi';
 import {
   listReceivedFiles,
   setupPublicSaveFolder,
@@ -87,6 +90,50 @@ export default function HomeScreen() {
   const [nameDraft, setNameDraft] = useState('');
   const [defaultName, setDefaultName] = useState('');
   const router = useRouter();
+  const [bgStates, setBgStates] = useState<Record<PermKey, boolean> | null>(null);
+  const [bgDismissed, setBgDismissed] = useState(false);
+
+  // Quiet reminder when notifications / battery access are off. Re-checked on focus and when the
+  // app resumes (the user may have just fixed it in system settings).
+  const refreshBg = useCallback(async () => {
+    if (Platform.OS !== 'android') return;
+    setBgStates(await getPermissionStates());
+  }, []);
+
+  useFocusEffect(
+    useCallback(() => {
+      void refreshBg();
+    }, [refreshBg])
+  );
+
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (st) => {
+      if (st === 'active') void refreshBg();
+    });
+    return () => sub.remove();
+  }, [refreshBg]);
+
+  const bgBanner = bgStates && !bgDismissed ? backgroundBannerText(bgStates) : null;
+
+  // First launch after install/update: offer the background-transfer permissions once.
+  useEffect(() => {
+    if (Platform.OS !== 'android') return;
+    let alive = true;
+    (async () => {
+      if (await isSetupDone()) return;
+      const states = await getPermissionStates();
+      if (!alive) return;
+      if (allGranted(states)) {
+        await markSetupDone();
+        return;
+      }
+      router.push('/setup' as any);
+    })();
+    return () => {
+      alive = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const refresh = useCallback(async () => {
     const has = await hasSaveDirectory();
@@ -253,6 +300,21 @@ export default function HomeScreen() {
         </View>
       </View>
 
+      {bgBanner && (
+        <View style={styles.bgBanner}>
+          <Text style={styles.bgBannerTitle}>{bgBanner.title}</Text>
+          <Text style={styles.bgBannerBody}>{bgBanner.body}</Text>
+          <View style={styles.bgBannerRow}>
+            <Pressable onPress={() => router.push('/settings' as any)}>
+              <Text style={styles.bgBannerAction}>Fix in Settings</Text>
+            </Pressable>
+            <Pressable onPress={() => setBgDismissed(true)}>
+              <Text style={styles.bgBannerDismiss}>Dismiss</Text>
+            </Pressable>
+          </View>
+        </View>
+      )}
+
       <View style={styles.modeContainer}>
         <Text style={styles.modeLabel}>Connection Mode</Text>
         <View style={styles.modeButtons}>
@@ -413,6 +475,19 @@ const styles = StyleSheet.create({
   nameValue: { color: '#fff', fontSize: 17, fontWeight: '700' },
   nameHint: { color: '#666', fontSize: 11, marginTop: 4 },
   nameEdit: { color: '#3b82f6', fontWeight: '700', marginLeft: 12 },
+  bgBanner: {
+    backgroundColor: '#141414',
+    borderColor: '#2a2a2a',
+    borderWidth: 1,
+    borderRadius: 12,
+    padding: 12,
+    marginBottom: 20,
+  },
+  bgBannerTitle: { color: '#e2e8f0', fontWeight: '700', fontSize: 14, marginBottom: 4 },
+  bgBannerBody: { color: '#94a3b8', fontSize: 12, lineHeight: 17 },
+  bgBannerRow: { flexDirection: 'row', justifyContent: 'space-between', marginTop: 10 },
+  bgBannerAction: { color: '#3b82f6', fontWeight: '700', fontSize: 13 },
+  bgBannerDismiss: { color: '#64748b', fontSize: 13 },
   folderBanner: {
     borderRadius: 14,
     padding: 16,

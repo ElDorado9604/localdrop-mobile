@@ -7,15 +7,15 @@
  *    dataSync time limit (Android 15+) ended it,
  *  - posts a "complete / failed" notification if the transfer ends while the app is hidden.
  *
+ * It never shows a permission dialog: notification / battery permissions are requested once in
+ * the first-launch setup (and can be changed in Settings). Without them the service still runs.
+ *
  * Call it from a transfer screen with the screen's live state. The transfer itself is untouched.
  */
 import { useEffect, useRef } from 'react';
-import { Alert, AppState, PermissionsAndroid, Platform } from 'react-native';
-import AsyncStorage from '@react-native-async-storage/async-storage';
+import { AppState } from 'react-native';
 import {
-  isIgnoringBatteryOptimizations,
   onTransferServiceAction,
-  requestIgnoreBatteryOptimizations,
   showTransferResult,
   startTransferService,
   stopTransferService,
@@ -30,7 +30,6 @@ import { logInfo, logWarn } from './logger';
 import { backgroundTick } from './wakeSignal';
 
 const TAG = 'foreground';
-const BATTERY_PROMPTED_KEY = 'localdrop.batteryPrompted.v1';
 const UPDATE_INTERVAL_MS = 1000;
 
 export type TransferForegroundParams = {
@@ -45,57 +44,6 @@ export type TransferForegroundParams = {
   /** Called when the user taps Cancel in the notification. */
   onCancel: () => void;
 };
-
-async function ensureNotificationPermission(): Promise<void> {
-  if (Platform.OS !== 'android' || Number(Platform.Version) < 33) return;
-  try {
-    const perm = PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS;
-    if (!perm) return;
-    if (await PermissionsAndroid.check(perm)) {
-      logInfo(TAG, 'notification permission: already granted');
-      return;
-    }
-    const res = await PermissionsAndroid.request(perm);
-    logInfo(TAG, `notification permission: ${res}`);
-  } catch (e) {
-    logWarn(TAG, `notification permission request failed: ${String(e)}`);
-  }
-}
-
-async function maybeAskBatteryExemption(): Promise<void> {
-  if (Platform.OS !== 'android') return;
-  try {
-    if (await AsyncStorage.getItem(BATTERY_PROMPTED_KEY)) return;
-    await AsyncStorage.setItem(BATTERY_PROMPTED_KEY, '1');
-    if (await isIgnoringBatteryOptimizations()) {
-      logInfo(TAG, 'battery optimization: already exempt');
-      return;
-    }
-    logInfo(TAG, 'battery optimization: asking user');
-    Alert.alert(
-      'Keep transfers running',
-      'To keep large transfers going while you use other apps, allow LocalDrop to run without battery restrictions.',
-      [
-        {
-          text: 'Not now',
-          style: 'cancel',
-          onPress: () => logInfo(TAG, 'battery optimization: user chose Not now'),
-        },
-        {
-          text: 'Allow',
-          onPress: () => {
-            logInfo(TAG, 'battery optimization: user chose Allow');
-            void requestIgnoreBatteryOptimizations().then((opened) =>
-              logInfo(TAG, `battery optimization dialog opened=${opened}`)
-            );
-          },
-        },
-      ]
-    );
-  } catch (e) {
-    logWarn(TAG, `battery optimization prompt failed: ${String(e)}`);
-  }
-}
 
 export function useTransferForeground(params: TransferForegroundParams): void {
   const latest = useRef(params);
@@ -135,8 +83,6 @@ export function useTransferForeground(params: TransferForegroundParams): void {
     (async () => {
       starting.current = true;
       try {
-        await ensureNotificationPermission();
-        if (disposed) return;
         const first = buildProgressNotification(latest.current);
         const ok = await startTransferService(first.title, first.text);
         if (disposed) {
@@ -147,7 +93,6 @@ export function useTransferForeground(params: TransferForegroundParams): void {
         logInfo(TAG, ok ? 'foreground service started' : 'foreground service NOT started');
         if (ok) {
           pushProgress(true);
-          void maybeAskBatteryExemption();
         }
       } finally {
         starting.current = false;
